@@ -179,13 +179,18 @@ class Config:
     # FunPay / lots
     lots: Dict[str, LotConfig] = field(default_factory=_default_lots)
 
-    # Spark HTTP API
-    spark_api_url: str = field(default_factory=lambda: _get("SPARK_API_URL", ""))
+    # Spark HTTP API (api.pubgredeemerbot.com). SPARK_API_URL is the BASE url;
+    # endpoints are derived from it (/v1/jobs/check-code, /v1/jobs/{id}).
+    spark_api_url: str = field(default_factory=lambda: _get("SPARK_API_URL", "").rstrip("/"))
     spark_api_key: str = field(default_factory=lambda: _get("SPARK_API_KEY", ""))
-    spark_timeout: float = field(default_factory=lambda: _get_float("SPARK_TIMEOUT", 20.0))
+    spark_timeout: float = field(default_factory=lambda: _get_float("SPARK_TIMEOUT", 30.0))
+    # Spark is a job API: POST creates a job, GET polls it. spark_job_wait is
+    # the per-poll long-poll hold (<=60); spark_max_wait bounds total polling.
+    spark_job_wait: float = field(default_factory=lambda: _get_float("SPARK_JOB_WAIT", 25.0))
+    spark_max_wait: float = field(default_factory=lambda: _get_float("SPARK_MAX_WAIT", 120.0))
     # When True (or when no URL is configured) the SparkChecker runs in mock
-    # mode - no network calls. Flip to False once the real endpoint/schema
-    # (docs from api.pubgredeemerbot.com) are wired into spark/parser.py.
+    # mode - no network calls. Flip to False once a real code sample confirms
+    # the finished-job result shape in spark/parser.py.
     spark_mock: bool = field(
         default_factory=lambda: _get_bool("SPARK_MOCK", not bool(_get("SPARK_API_URL")))
     )
@@ -196,9 +201,9 @@ class Config:
     retry_backoff: float = field(default_factory=lambda: _get_float("RETRY_BACKOFF", 2.0))
 
     # Code format (section 9). Single source of truth for the pattern.
-    # Placeholder pattern until the real PUBG 60 UC format is provided.
+    # Per the Spark API spec a UC voucher is exactly 18 letters/digits.
     code_pattern: str = field(
-        default_factory=lambda: _get("CODE_PATTERN", r"[A-Za-z0-9]{8,32}")
+        default_factory=lambda: _get("CODE_PATTERN", r"[A-Za-z0-9]{18}")
     )
 
     # Database (section 6). Separate file, does NOT touch FPC's own storage.
@@ -214,6 +219,13 @@ class Config:
     log_file: str = field(default_factory=lambda: _get("LOG_FILE", ""))
 
     messages: Messages = field(default_factory=Messages)
+
+    # Spark endpoint helpers (derived from the base url).
+    def spark_check_code_url(self) -> str:
+        return f"{self.spark_api_url}/v1/jobs/check-code"
+
+    def spark_job_url(self, job_id: str) -> str:
+        return f"{self.spark_api_url}/v1/jobs/{job_id}"
 
     def lot(self, lot_id) -> LotConfig | None:
         return self.lots.get(str(lot_id))

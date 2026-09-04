@@ -59,15 +59,31 @@ retry_service (в отдельном потоке) → SparkChecker → parser �
 apply_result: статус заказа/кода + сообщение покупателю + лог
 ```
 
-### Слой преобразования Spark (секция 3 ТЗ)
+### Интеграция со Spark (`api.pubgredeemerbot.com`)
+
+Spark — **асинхронный job-API**. `SparkChecker.check_code()`:
 
 ```
-Spark response → parser.parse() → UnifiedStatus → бизнес-логика
+POST /v1/jobs/check-code  {"codes": ["<code>"]}   → job_id
+GET  /v1/jobs/{job_id}?wait=25  (long-poll, ≤60с) → ждём status=done/failed
+result.results[0] → parser.parse_job() → UnifiedStatus → бизнес-логика
 ```
+
+- Авторизация: заголовок `X-API-Key` (ключ из Telegram `@sparkucbot → API`).
+- Код: ровно **18** символов `[A-Za-z0-9]`, шлётся массивом `codes`.
+- HTTP-маппинг: `429/5xx/сеть` → временная ошибка (retry); `401/403` → критическая; `404` → критическая.
 
 Бизнес-логика зависит только от `UnifiedStatus`
 (`VALID / INVALID / ACCOUNT_NOT_FOUND / ALREADY_USED / ERROR / UNKNOWN`).
 Замена Spark или изменение формата ответа = правка только `parser.py`.
+
+> ⚠️ **Одно место требует реального примера.** В OpenAPI-схеме Spark тело
+> завершённого job'а описано пустым объектом, поэтому точные поля per-code
+> результата (какое поле = «валиден» / «уже использован» / «аккаунт не найден»)
+> пока не подтверждены. `parser.parse_job()` сделан устойчивым: сперва читает
+> булев флаг (`valid`/`is_valid`/`redeemable`), иначе матчит по ключевым словам
+> в текстовых полях. Пришлите один реальный JSON завершённого job'а — маппинг
+> зафиксируется точно, без изменений в остальном коде.
 
 ## Идемпотентность и защита от повторов
 
@@ -121,11 +137,14 @@ event, timeout/500/недоступность Spark, критическая ош
 
 ## Что нужно уточнить перед боевым запуском
 
-1. **Формат ответа Spark** (реальные примеры VALID / INVALID / ACCOUNT_NOT_FOUND
-   / ALREADY_USED / ошибка) → правка `parser.py` и `_check_http`.
-2. **`CODE_PATTERN`** — точный формат кода PUBG 60 UC.
-3. **Тексты сообщений** покупателю (сейчас — заглушки).
-4. **`resolve_lot_id`** — сверить с версией FunPayAPI в вашем FPC (способ
+1. **Реальный JSON завершённого job'а** Spark (`GET /v1/jobs/{id}` после `done`)
+   для валидного и для невалидного/использованного кода → зафиксировать маппинг
+   в `parser.parse_job()`.
+2. **Тексты сообщений** покупателю (сейчас — заглушки в `config.py`).
+3. **`resolve_lot_id`** — сверить с версией FunPayAPI в вашем FPC (способ
    получить offer id из заказа).
-5. **`SPARK_MOCK=false`** + `SPARK_API_URL`/`SPARK_API_KEY` — включить реальную
-   проверку.
+4. Включить реальную проверку: `SPARK_MOCK=0` + `SPARK_API_KEY=<ключ>`
+   (endpoint уже настроен: `SPARK_API_URL=https://api.pubgredeemerbot.com`).
+
+Транспорт Spark (job-API, `X-API-Key`, формат кода 18 символов) уже реализован
+по OpenAPI-спецификации.

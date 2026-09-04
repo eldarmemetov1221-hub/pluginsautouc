@@ -2,19 +2,25 @@
 
     Spark response  ->  parser  ->  unified status  ->  business logic
 
-THIS IS THE ONLY PLACE that knows Spark's wire format. When the real
-api.pubgredeemerbot.com schema is available, edit ONLY this file - the rest of
-the plugin keeps working unchanged.
+THIS IS THE ONLY PLACE that knows Spark's wire format. Spark is a job API, so
+the input is a finished job document; :func:`parse_job` reduces it to the
+per-code result row and :func:`parse` classifies that row.
 
-Until the real examples are provided, the parser is intentionally *heuristic*:
-it inspects common fields (``status`` / ``result`` / ``message`` / ``error`` /
-``code``) and keyword-matches them to a UnifiedStatus. The keyword tables below
-are the single knob to tune.
+    job = {
+        "status": "done",
+        "result": {"results": [ {<per-code row>}, ... ]}
+    }
+
+The exact field names of a per-code row are NOT in the OpenAPI spec (its result
+schemas are empty). Until a real finished-job sample is provided, classification
+is defensive: an explicit boolean validity field is honoured first, otherwise a
+keyword match over the row's text fields decides. Adjust the tables / field
+lists below once the real shape is known - nothing else changes.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..utils.logger import get_logger
 from .models import SparkResult, UnifiedStatus
@@ -22,10 +28,10 @@ from .models import SparkResult, UnifiedStatus
 log = get_logger("spark.parser")
 
 # --------------------------------------------------------------------------- #
-# Keyword tables. Adjust these to Spark's real vocabulary. Order matters only
-# in that ACCOUNT_NOT_FOUND / ALREADY_USED are checked before the generic
-# INVALID so a more specific reason wins.
-# --------------------------------------------------------------------------- #
+# Field names that carry an explicit boolean validity. Checked before text.
+_BOOL_VALID_KEYS = ("valid", "is_valid", "redeemable", "success", "ok")
+
+# Keyword tables over the row's textual fields. Adjust to Spark's vocabulary.
 _ACCOUNT_NOT_FOUND = (
     "account does not exist",
     "account not found",
@@ -40,6 +46,7 @@ _ALREADY_USED = (
     "already redeemed",
     "code used",
     "used code",
+    "already claimed",
 )
 _INVALID = (
     "invalid",
@@ -47,24 +54,30 @@ _INVALID = (
     "incorrect",
     "expired",
     "wrong code",
-    "does not exist",  # generic invalid-code phrasing
+    "not found",
+    "does not exist",
 )
 _VALID = (
-    "success",
     "redeemed successfully",
+    "redeemable",
+    "success",
     "valid",
     "delivered",
     "completed",
 )
 
+# Textual fields scanned for keywords.
+_TEXT_KEYS = ("status", "result", "state", "message", "msg", "error", "reason", "detail", "code_status")
+
 
 def _text_of(payload: Dict[str, Any]) -> str:
-    """Concatenate the human-readable fields for keyword matching."""
     parts = []
-    for key in ("status", "result", "state", "message", "msg", "error", "reason", "detail"):
+    for key in _TEXT_KEYS:
         val = payload.get(key)
         if isinstance(val, str):
             parts.append(val)
+        elif isinstance(val, bool):
+            continue  # booleans handled separately
         elif val is not None:
             parts.append(str(val))
     return " ".join(parts).lower()
@@ -74,32 +87,63 @@ def _match(text: str, needles) -> bool:
     return any(n in text for n in needles)
 
 
-def parse(payload: Dict[str, Any], http_status: int | None = None) -> SparkResult:
-    """Map a decoded Spark JSON payload to a :class:`SparkResult`.
+def _bool_validity(payload: Dict[str, Any]) -> Optional[bool]:
+    for key in _BOOL_VALID_KEYS:
+        val = payload.get(key)
+        if isinstance(val, bool):
+            return val
+    return None
 
-    A payload that matches nothing yields :attr:`UnifiedStatus.UNKNOWN`, which
-    the client treats as a critical (unrecognised) response rather than
-    silently succeeding.
-    """
+
+def parse(payload: Dict[str, Any], http_status: int | None = None) -> SparkResult:
+    """Classify a single per-code result row into a :class:`SparkResult`."""
     if not isinstance(payload, dict):
         return SparkResult(UnifiedStatus.UNKNOWN, raw={"_raw": payload}, http_status=http_status)
 
     text = _text_of(payload)
     msg = str(payload.get("message") or payload.get("msg") or payload.get("error") or "")
 
-    # Most specific reasons first.
-    # Most specific / most negative reasons first; "invalid" before "valid"
-    # (the former contains the latter as a substring).
+    # Specific negative reasons win regardless of any boolean flag.
     if _match(text, _ACCOUNT_NOT_FOUND):
         status = UnifiedStatus.ACCOUNT_NOT_FOUND
     elif _match(text, _ALREADY_USED):
         status = UnifiedStatus.ALREADY_USED
-    elif _match(text, _INVALID):
-        status = UnifiedStatus.INVALID
-    elif _match(text, _VALID):
-        status = UnifiedStatus.VALID
     else:
-        status = UnifiedStatus.UNKNOWN
-        log.warning("Unrecognised Spark payload: keys=%s", list(payload.keys()))
+        flag = _bool_validity(payload)
+        if flag is True:
+            status = UnifiedStatus.VALID
+        elif flag is False:
+            status = UnifiedStatus.INVALID
+        elif _match(text, _INVALID):
+            status = UnifiedStatus.INVALID
+        elif _match(text, _VALID):
+            status = UnifiedStatus.VALID
+        else:
+            status = UnifiedStatus.UNKNOWN
+            log.warning("Unrecognised Spark row: keys=%s", list(payload.keys()))
 
     return SparkResult(status=status, raw=payload, message=msg, http_status=http_status)
+
+
+def _first_row(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a finished job document to the single per-code result row."""
+    result = job.get("result", job)
+    if isinstance(result, dict):
+        rows = result.get("results")
+        if isinstance(rows, list) and rows:
+            first = rows[0]
+            return first if isinstance(first, dict) else {"_raw": first}
+        # No results[] wrapper - treat the result object itself as the row.
+        return result
+    if isinstance(result, list) and result:
+        first = result[0]
+        return first if isinstance(first, dict) else {"_raw": first}
+    return job
+
+
+def parse_job(job: Dict[str, Any], http_status: int | None = None) -> SparkResult:
+    """Parse a finished Spark job document into a :class:`SparkResult`."""
+    if not isinstance(job, dict):
+        return SparkResult(UnifiedStatus.UNKNOWN, raw={"_raw": job}, http_status=http_status)
+    row = _first_row(job)
+    return parse(row, http_status=http_status)
