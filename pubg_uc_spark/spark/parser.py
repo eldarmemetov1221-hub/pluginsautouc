@@ -79,7 +79,9 @@ _VALID = (
 _TEXT_KEYS = ("status", "result", "state", "message", "msg", "error", "reason", "detail", "code_status")
 
 # Fields that may carry the resolved player/character name.
-_NAME_KEYS = ("player_name", "character_name", "nickname", "nick", "ign", "name", "username")
+# ("charac_name" is what stock-redeem returns per code, incl. in order_details.)
+_NAME_KEYS = ("charac_name", "player_name", "character_name", "nickname", "nick",
+              "ign", "name", "username")
 
 # Spark returns structured errors as {"detail": {"error": "CODE", "message": ...}}
 # (FastAPI style). Mapping the CODE is far more reliable than free-text matching.
@@ -108,9 +110,10 @@ def error_code(payload) -> str:
     detail = payload.get("detail")
     if isinstance(detail, dict) and detail.get("error"):
         return str(detail["error"])
-    for key in ("error_code", "code"):
+    # stock-redeem per-code rows use "err_code" (empty string on success).
+    for key in ("err_code", "error_code", "code_error"):
         val = payload.get(key)
-        if isinstance(val, str) and val:
+        if isinstance(val, str) and val.strip():
             return val
     return ""
 

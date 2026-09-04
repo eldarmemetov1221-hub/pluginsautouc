@@ -87,6 +87,46 @@ def test_parser_structured_error_codes():
     assert parser.parse({"detail": {"error": "PLAYER_NOT_FOUND"}}).status is UnifiedStatus.ACCOUNT_NOT_FOUND
 
 
+def test_parse_real_stock_redeem_success_job():
+    # Real finished job captured from the live API (trimmed).
+    job = {
+        "type": "stock_redeem",
+        "status": "done",
+        "result": {
+            "ok_count": 1,
+            "results": [
+                {
+                    "code": "53HwbW8K2E2d4dZ0R5",  # stock cdkey - must NOT be read as an error code
+                    "denomination": 60,
+                    "success": True,
+                    "msg": "",
+                    "err_code": "",
+                    "cdkey_name": "60 UC",
+                    "charac_name": "Balabechka",
+                    "order_details": {"status": "Success", "charac_name": "Balabechka"},
+                }
+            ],
+            "player_id": "5782609572",
+        },
+    }
+    r = parser.parse_job(job)
+    assert r.status is UnifiedStatus.VALID
+    assert r.player_name == "Balabechka"
+
+
+def test_parse_stock_redeem_failure_row():
+    # A per-code failure row uses success=false + err_code.
+    job = {"status": "done", "result": {"results": [
+        {"success": False, "err_code": "INVALID_PLAYER_ID", "msg": "bad id"}]}}
+    assert parser.parse_job(job).status is UnifiedStatus.ACCOUNT_NOT_FOUND
+    job2 = {"status": "done", "result": {"results": [
+        {"success": False, "err_code": "OUT_OF_STOCK", "msg": ""}]}}
+    assert parser.parse_job(job2).status is UnifiedStatus.ERROR
+    job3 = {"status": "done", "result": {"results": [
+        {"success": False, "err_code": "SOME_OTHER", "msg": "declined"}]}}
+    assert parser.parse_job(job3).status is UnifiedStatus.INVALID
+
+
 def test_fsm_transitions():
     assert can_transition(OrderStatus.NEW, OrderStatus.WAITING_FOR_CODE)
     assert can_transition(OrderStatus.CHECKING, OrderStatus.VALID)
