@@ -20,6 +20,7 @@ from pubg_uc_spark.database.models import CodeStatus, OrderStatus  # noqa: E402
 VALID = "100000000"
 INVALID = "700000000"
 NOACC = "200000000"
+NOACC2 = "200000001"
 TEMP = "300000000"
 CRIT = "400000000"
 STOCK = "500000000"
@@ -91,8 +92,8 @@ def test_invalid_redeem(plugin, cardinal):
     assert _order_status(plugin, "1005") == OrderStatus.INVALID.value
 
 
-# 5. Account not found -> ACCOUNT_NOT_FOUND + reason stored.
-def test_account_not_found(plugin, cardinal):
+# 5. Account not found (1st strike) -> ACCOUNT_NOT_FOUND + "try again" message.
+def test_account_not_found_first_strike(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "1006"))
     _msg(plugin, cardinal, "buyer-1", "chat-1", NOACC, "m4")
     order = plugin.repo.get_order_by_funpay_id("1006")
@@ -100,6 +101,20 @@ def test_account_not_found(plugin, cardinal):
     code = plugin.repo.get_codes_for_order(order.id)[0]
     assert code.status == CodeStatus.ACCOUNT_NOT_FOUND.value
     assert code.error_message == "account_not_found"
+    assert any("Проверьте правильность UID" in t for t in cardinal.texts_to("chat-1"))
+
+
+# 5b. Second UID error -> escalate to seller; further UIDs ignored.
+def test_account_not_found_two_strikes(plugin, cardinal):
+    plugin.on_new_order(make_order(cardinal, "1006b"))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", NOACC, "s1")   # 1st bad UID
+    assert _order_status(plugin, "1006b") == OrderStatus.ACCOUNT_NOT_FOUND.value
+    _msg(plugin, cardinal, "buyer-1", "chat-1", NOACC2, "s2")  # 2nd bad UID (new)
+    assert _order_status(plugin, "1006b") == OrderStatus.ERROR.value
+    assert any("Ожидайте ответ продавца" in t for t in cardinal.texts_to("chat-1"))
+    # Order is escalated: a subsequent (even valid) UID is no longer processed.
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "s3")
+    assert _order_status(plugin, "1006b") == OrderStatus.ERROR.value
 
 
 # 6. Out of stock -> ERROR + admin, buyer gets the error message.

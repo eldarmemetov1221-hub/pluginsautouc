@@ -150,11 +150,18 @@ class Messages:
             "Проверьте ID или свяжитесь с продавцом.",
         )
     )
+    # 1st UID error (account not found): ask the buyer to re-check and resend.
     account_not_found: str = field(
         default_factory=lambda: _get(
             "MSG_ACCOUNT_NOT_FOUND",
-            "Аккаунт с ID {uid} не найден (заказ #{order_id}). Проверьте, "
-            "пожалуйста, игровой ID и пришлите его ещё раз.",
+            "Ошибка UID! Проверьте правильность UID и попробуйте ещё раз.",
+        )
+    )
+    # 2nd UID error on the same order: stop and hand over to the seller.
+    account_not_found_final: str = field(
+        default_factory=lambda: _get(
+            "MSG_ACCOUNT_NOT_FOUND_FINAL",
+            "Повторная ошибка в UID. Ожидайте ответ продавца!",
         )
     )
     bad_format: str = field(

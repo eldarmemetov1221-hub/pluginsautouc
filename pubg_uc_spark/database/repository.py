@@ -100,10 +100,15 @@ class Repository:
         return self._row_to_order(row) if row else None
 
     def get_active_orders_for_buyer(self, buyer_id: str) -> List[OrderRecord]:
-        """Orders of a buyer that are awaiting / mid-processing a code."""
+        """Orders of a buyer that can still accept a UID from an incoming message.
+
+        NOTE: ERROR is intentionally excluded - once an order is escalated to the
+        seller (repeated UID error / out of stock / critical), the bot stops
+        auto-processing new UIDs for it until an admin acts.
+        """
         rows = self.db.query_all(
             """SELECT * FROM orders
-               WHERE buyer_id = ? AND status IN (?,?,?,?,?,?)
+               WHERE buyer_id = ? AND status IN (?,?,?,?,?)
                ORDER BY created_at ASC""",
             (
                 buyer_id,
@@ -112,7 +117,6 @@ class Repository:
                 OrderStatus.ALREADY_USED.value,
                 OrderStatus.ACCOUNT_NOT_FOUND.value,
                 OrderStatus.TEMPORARY_ERROR.value,
-                OrderStatus.ERROR.value,
             ),
         )
         return [self._row_to_order(r) for r in rows]

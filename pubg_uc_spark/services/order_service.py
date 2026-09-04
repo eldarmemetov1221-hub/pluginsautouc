@@ -25,16 +25,12 @@ log = get_logger("order")
 
 
 # Spark UnifiedStatus -> (code status, order status, message attribute)
-# UnifiedStatus -> (code status, order status, buyer-message attribute)
+# UnifiedStatus -> (code status, order status, buyer-message attribute).
+# ACCOUNT_NOT_FOUND is handled separately (two-strike escalation), not here.
 _RESULT_MAP = {
     UnifiedStatus.VALID: (CodeStatus.VALID, OrderStatus.VALID, "valid"),
     UnifiedStatus.INVALID: (CodeStatus.INVALID, OrderStatus.INVALID, "invalid"),
     UnifiedStatus.ALREADY_USED: (CodeStatus.ALREADY_USED, OrderStatus.ALREADY_USED, "invalid"),
-    UnifiedStatus.ACCOUNT_NOT_FOUND: (
-        CodeStatus.ACCOUNT_NOT_FOUND,
-        OrderStatus.ACCOUNT_NOT_FOUND,
-        "account_not_found",
-    ),
 }
 
 
@@ -160,6 +156,11 @@ class OrderService:
 
         uid = code.code
 
+        # --- UID does not exist: two-strike escalation ---
+        if result is not None and result.status is UnifiedStatus.ACCOUNT_NOT_FOUND:
+            self._handle_account_not_found(code_id, code, order, oid, uid, result)
+            return
+
         # --- Success / definitive buyer-facing outcomes ---
         if result is not None and result.status in _RESULT_MAP:
             code_status, order_status, msg_attr = _RESULT_MAP[result.status]
@@ -252,6 +253,51 @@ class OrderService:
                 f"result:{code_id}", order.chat_id, self._fmt(order, self.cfg.messages.error, uid)
             )
         self._notify_admin(f"🛑 Order #{oid}: critical error: {error}")
+
+    # ------------------------------------------------------------------ #
+    def _handle_account_not_found(self, code_id, code, order, oid, uid, result) -> None:
+        """UID not found: 1st time ask to retry; 2nd time escalate to seller."""
+        # Count prior account-not-found codes on this order (before this one).
+        prior = 0
+        if order:
+            prior = sum(
+                1
+                for c in self.repo.get_codes_for_order(order.id)
+                if c.id != code_id and c.status == CodeStatus.ACCOUNT_NOT_FOUND.value
+            )
+        self.repo.update_code(
+            code_id,
+            status=CodeStatus.ACCOUNT_NOT_FOUND,
+            spark_status=result.status.value,
+            error_message="account_not_found",
+            checked=True,
+        )
+        self.repo.add_log(
+            "account_not_found", f"attempt={prior + 1}",
+            order_id=code.order_id, code_id=code_id,
+        )
+
+        if prior == 0:
+            # First strike: buyer may resend a corrected UID.
+            if order:
+                self.repo.set_order_status(order.id, OrderStatus.ACCOUNT_NOT_FOUND)
+            log.info("[Order #%s] UID not found (1st) -> ask to retry", oid)
+            if order and order.chat_id:
+                self.messenger.send_once(
+                    f"result:{code_id}", order.chat_id,
+                    self._fmt(order, self.cfg.messages.account_not_found, uid),
+                )
+        else:
+            # Second strike: stop auto-processing, hand over to the seller.
+            if order:
+                self.repo.set_order_status(order.id, OrderStatus.ERROR)
+            log.warning("[Order #%s] UID not found (2nd) -> escalate to seller", oid)
+            if order and order.chat_id:
+                self.messenger.send_once(
+                    f"result:{code_id}", order.chat_id,
+                    self._fmt(order, self.cfg.messages.account_not_found_final, uid),
+                )
+            self._notify_admin(f"🛑 Order #{oid}: repeated UID error (uid={uid}), seller action needed")
 
     # ------------------------------------------------------------------ #
     # Restart recovery (section 19 & 20)
