@@ -1,0 +1,9 @@
+# Runtime deps for the PUBG UC / Spark plugin.
+# NOTE: FunPayCardinal already ships requests, FunPayAPI and pyTelegramBotAPI,
+# so under FPC nothing extra is usually needed. Listed here for standalone dev
+# and CI. sqlite3 is part of the Python standard library.
+requests>=2.28
+python-dotenv>=1.0
+
+# Dev / tests only:
+pytest>=7.0
