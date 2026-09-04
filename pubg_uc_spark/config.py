@@ -75,6 +75,11 @@ class LotConfig:
     lot_id: str
     product: str
     denomination: str = "60"
+    # Keywords matched (AND, case-insensitive substrings) against the FunPay
+    # order description to recognise this lot. FunPay orders do NOT expose the
+    # offer id, so matching is by description. Empty -> match by denomination
+    # (as a whole number) + "uc".
+    keywords: list = field(default_factory=list)
 
 
 def _default_lots() -> Dict[str, LotConfig]:
@@ -95,6 +100,7 @@ def _default_lots() -> Dict[str, LotConfig]:
                     product=str(meta.get("product", "")),
                     # accept "denomination" or legacy "quantity"
                     denomination=str(meta.get("denomination", meta.get("quantity", "60"))),
+                    keywords=list(meta.get("keywords", []) or []),
                 )
                 for lid, meta in data.items()
             }

@@ -42,6 +42,28 @@ def test_code_hash_stable_and_masking():
     assert mask_code("") == "<empty>"
 
 
+def test_lot_matching_by_description():
+    from types import SimpleNamespace
+
+    from pubg_uc_spark.config import Config, LotConfig
+    from pubg_uc_spark.funpay import orders as fo
+
+    cfg = Config()
+    cfg.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", "60")}
+
+    def sc(desc):
+        return SimpleNamespace(description=desc)
+
+    assert fo.match_lot(cfg, sc("PUBG Mobile 60 UC для ID игрока")) is not None
+    # denomination matched as a whole number: 660 UC must NOT match the 60 lot
+    assert fo.match_lot(cfg, sc("PUBG Mobile 660 UC")) is None
+    assert fo.match_lot(cfg, sc("Brawl Stars gems")) is None
+    # explicit keywords override
+    cfg.lots = {"1": LotConfig("1", "X", "60", keywords=["pubg", "60 uc"])}
+    assert fo.match_lot(cfg, sc("PUBG top-up 60 UC")) is not None
+    assert fo.match_lot(cfg, sc("PUBG 120 UC")) is None
+
+
 def test_parse_job_and_boolean_validity():
     # A finished job with a per-code result row.
     valid_job = {"status": "done", "result": {"results": [{"code": "x", "valid": True}]}}

@@ -1,15 +1,15 @@
-"""FunPay order parsing & lot resolution (task spec, sections 2 & 8).
+"""FunPay order parsing & lot matching (task spec, sections 2 & 8).
 
-Turns a FunPayCardinal ``NewOrderEvent`` into our :class:`OrderRecord`. Lot
-matching is by ``lot_id`` (per the chosen strategy): we fetch the full order
-and resolve its offer id, then compare against the configured ``LOTS``.
+Turns a FunPayCardinal ``NewOrderEvent.order`` (a ``FunPayAPI.types.OrderShortcut``)
+into our :class:`OrderRecord`.
 
-IMPORTANT / INTEGRATION NOTE:
-FunPay's order object does not always expose the originating offer (lot) id in a
-single stable attribute across FunPayAPI versions. :func:`resolve_lot_id` tries
-the common locations and finally scans the order description/html for an
-``offer?id=`` link. Verify this against the FunPayAPI version installed in the
-target FPC before enabling in production; it is the one spot to adjust.
+IMPORTANT (verified against sidor0912/FunPayAPI): a FunPay order object does NOT
+expose the originating offer/lot id. ``OrderShortcut`` provides ``id``,
+``description`` (the lot title), ``subcategory`` / ``subcategory_name``,
+``buyer_id``, ``buyer_username``, ``amount``, ``chat_id``. So a lot is matched by
+its **description** (configurable keywords), not by the numeric lot id. The
+configured ``lot_id`` is kept only as our own identifier/label for the matched
+lot.
 """
 
 from __future__ import annotations
@@ -17,71 +17,53 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from ..config import Config, LotConfig
 from ..database.models import OrderRecord
 from ..utils.logger import get_logger
 
 log = get_logger("funpay.orders")
 
-_OFFER_ID_RE = re.compile(r"offer\?id=(\d+)")
+
+def _matches(lot: LotConfig, description: str) -> bool:
+    desc = (description or "").lower()
+    if not desc:
+        return False
+    if lot.keywords:
+        return all(str(k).lower() in desc for k in lot.keywords)
+    # Default: the denomination as a WHOLE number (so "60" != "660") + "uc".
+    denom = str(lot.denomination)
+    if denom and not re.search(rf"(?<!\d){re.escape(denom)}(?!\d)", desc):
+        return False
+    return "uc" in desc
 
 
-def resolve_lot_id(full_order, order_shortcut) -> Optional[str]:
-    """Best-effort extraction of the FunPay lot/offer id from an order."""
-    for obj in (full_order, order_shortcut):
-        if obj is None:
-            continue
-        for attr in ("lot_id", "offer_id", "subcategory_id"):
-            val = getattr(obj, attr, None)
-            if val:
-                return str(val)
-        # Scan any textual description for an offer link.
-        for attr in ("full_description", "description", "html", "title"):
-            text = getattr(obj, attr, None)
-            if isinstance(text, str):
-                m = _OFFER_ID_RE.search(text)
-                if m:
-                    return m.group(1)
+def match_lot(cfg: Config, order_shortcut) -> Optional[LotConfig]:
+    """Return the configured lot whose description keywords match, else None."""
+    description = getattr(order_shortcut, "description", "") or ""
+    for lot in cfg.lots.values():
+        if _matches(lot, description):
+            return lot
     return None
 
 
-def build_order_record(cardinal, order_shortcut) -> Optional[OrderRecord]:
-    """Build an :class:`OrderRecord` from a NewOrderEvent's order shortcut.
+def build_order_record(order_shortcut, lot: LotConfig) -> OrderRecord:
+    """Build an :class:`OrderRecord` from the NewOrderEvent's order shortcut."""
 
-    Returns ``None`` if the lot id cannot be resolved (caller then skips it).
-    """
-    funpay_order_id = str(getattr(order_shortcut, "id", "") or "")
-    full_order = None
+    def g(attr, default=""):
+        v = getattr(order_shortcut, attr, None)
+        return v if v not in (None, "") else default
+
+    amount = g("amount", 1)
     try:
-        account = getattr(cardinal, "account", None)
-        if account is not None and funpay_order_id:
-            full_order = account.get_order(funpay_order_id)
-    except Exception:
-        log.exception("Could not fetch full order %s", funpay_order_id)
-
-    lot_id = resolve_lot_id(full_order, order_shortcut)
-
-    def pick(*attrs, default=""):
-        for src in (full_order, order_shortcut):
-            for a in attrs:
-                v = getattr(src, a, None) if src is not None else None
-                if v not in (None, ""):
-                    return v
-        return default
-
-    buyer_id = str(pick("buyer_id"))
-    buyer_username = str(pick("buyer_username", "buyer_name"))
-    quantity = pick("amount", "quantity", default=1)
-    try:
-        quantity = int(quantity)
+        amount = int(amount)
     except (TypeError, ValueError):
-        quantity = 1
-    chat_id = str(pick("chat_id"))
+        amount = 1
 
     return OrderRecord(
-        funpay_order_id=funpay_order_id,
-        lot_id=str(lot_id) if lot_id else "",
-        buyer_id=buyer_id,
-        buyer_username=buyer_username,
-        quantity=quantity,
-        chat_id=chat_id,
+        funpay_order_id=str(g("id")),
+        lot_id=lot.lot_id,
+        buyer_id=str(g("buyer_id")),
+        buyer_username=str(g("buyer_username")),
+        quantity=amount,
+        chat_id=str(g("chat_id")),
     )

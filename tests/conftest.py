@@ -13,31 +13,21 @@ from pubg_uc_spark.config import Config, LotConfig  # noqa: E402
 from pubg_uc_spark.plugin import Plugin  # noqa: E402
 
 
-class FakeFullOrder:
-    def __init__(self, order_id, lot_id, buyer_id, buyer_username, amount=1, chat_id="chat-1"):
+class FakeOrderShortcut:
+    """Mirrors FunPayAPI.types.OrderShortcut (matched by description)."""
+
+    def __init__(self, order_id, description, buyer_id, buyer_username, amount=1, chat_id="chat-1"):
         self.id = order_id
-        self.lot_id = str(lot_id)
+        self.description = description
         self.buyer_id = str(buyer_id)
         self.buyer_username = buyer_username
         self.amount = amount
         self.chat_id = chat_id
 
 
-class FakeOrderShortcut:
-    def __init__(self, order_id):
-        self.id = order_id
-
-
 class FakeAccount:
     def __init__(self):
         self.id = "seller-1"
-        self._orders = {}
-
-    def register(self, full_order):
-        self._orders[str(full_order.id)] = full_order
-
-    def get_order(self, order_id):
-        return self._orders.get(str(order_id))
 
 
 class FakeCardinal:
@@ -63,7 +53,7 @@ def cfg(tmp_path):
     c.retry_delay = 0.0
     c.retry_backoff = 1.0
     c.code_pattern = r"[0-9]{9,11}"
-    c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", 60)}
+    c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", "60")}
     c.admin_ids = [111]
     return c
 
@@ -82,11 +72,13 @@ def plugin(cfg, cardinal):
 
 def make_order(cardinal, order_id, lot_id="37330959", buyer_id="buyer-1",
                username="john", amount=1, chat_id="chat-1"):
-    """Register a fake full order and return its NEW_ORDER shortcut."""
-    cardinal.account.register(
-        FakeFullOrder(order_id, lot_id, buyer_id, username, amount, chat_id)
-    )
-    return FakeOrderShortcut(order_id)
+    """Return a NEW_ORDER shortcut. lot_id="37330959" -> a matching 60 UC
+    description; anything else -> a non-matching description."""
+    if str(lot_id) == "37330959":
+        description = "PUBG Mobile 60 UC (id игрока)"
+    else:
+        description = "Some other product 999"
+    return FakeOrderShortcut(order_id, description, buyer_id, username, amount, chat_id)
 
 
 class FakeMessage:

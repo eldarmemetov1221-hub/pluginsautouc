@@ -85,15 +85,16 @@ class Plugin:
             log.info("[FunPay] Duplicate NEW_ORDER event #%s ignored", funpay_order_id)
             return
 
-        record = funpay_orders.build_order_record(self.cardinal, order_shortcut)
-        if record is None or not record.funpay_order_id:
+        # FunPay orders carry no offer id, so match the tracked lot by the
+        # order description (configurable keywords / denomination + "uc").
+        lot = funpay_orders.match_lot(self.cfg, order_shortcut)
+        if lot is None:
+            desc = getattr(order_shortcut, "description", "") or ""
+            log.info("[FunPay] Order #%s not a tracked lot (desc=%r), skipped",
+                     funpay_order_id, desc[:80])
             return
-        # Lot matching strictly by lot_id (chosen strategy).
-        if not self.cfg.is_tracked_lot(record.lot_id):
-            log.info(
-                "[FunPay] Order #%s lot=%s not tracked, skipped",
-                record.funpay_order_id, record.lot_id or "?",
-            )
+        record = funpay_orders.build_order_record(order_shortcut, lot)
+        if not record.funpay_order_id:
             return
         self.orders.handle_new_order(record)
 
