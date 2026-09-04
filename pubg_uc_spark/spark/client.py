@@ -173,7 +173,8 @@ class SparkChecker:
     def _redeem_mock(self, player_id: str, picks: Dict[str, int]) -> SparkResult:
         head = (player_id or "0")[0]
         if head == "2":
-            row = {"player_id": player_id, "status": "error", "message": "account does not exist"}
+            # mirror the real Spark error shape: {"detail": {"error": CODE}}
+            row = {"detail": {"error": "INVALID_PLAYER_ID", "message": "Invalid player identifier."}}
         elif head == "3":
             raise SparkTemporaryError("Mock temporary error")
         elif head == "4":

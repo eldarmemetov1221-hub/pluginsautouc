@@ -81,6 +81,39 @@ _TEXT_KEYS = ("status", "result", "state", "message", "msg", "error", "reason", 
 # Fields that may carry the resolved player/character name.
 _NAME_KEYS = ("player_name", "character_name", "nickname", "nick", "ign", "name", "username")
 
+# Spark returns structured errors as {"detail": {"error": "CODE", "message": ...}}
+# (FastAPI style). Mapping the CODE is far more reliable than free-text matching.
+_ERROR_CODE_MAP = {
+    # UID / account problems -> ACCOUNT_NOT_FOUND
+    "INVALID_PLAYER_ID": UnifiedStatus.ACCOUNT_NOT_FOUND,
+    "PLAYER_NOT_FOUND": UnifiedStatus.ACCOUNT_NOT_FOUND,
+    "ACCOUNT_NOT_FOUND": UnifiedStatus.ACCOUNT_NOT_FOUND,
+    "UNKNOWN_PLAYER": UnifiedStatus.ACCOUNT_NOT_FOUND,
+    "INVALID_UID": UnifiedStatus.ACCOUNT_NOT_FOUND,
+    # stock problems -> operational ERROR (seller must restock)
+    "OUT_OF_STOCK": UnifiedStatus.ERROR,
+    "NO_STOCK": UnifiedStatus.ERROR,
+    "INSUFFICIENT_STOCK": UnifiedStatus.ERROR,
+    "STOCK_EMPTY": UnifiedStatus.ERROR,
+    # already redeemed
+    "ALREADY_USED": UnifiedStatus.ALREADY_USED,
+    "ALREADY_REDEEMED": UnifiedStatus.ALREADY_USED,
+}
+
+
+def error_code(payload) -> str:
+    """Extract a structured error CODE from a Spark payload, if any."""
+    if not isinstance(payload, dict):
+        return ""
+    detail = payload.get("detail")
+    if isinstance(detail, dict) and detail.get("error"):
+        return str(detail["error"])
+    for key in ("error_code", "code"):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
 
 def extract_player_name(payload: Dict[str, Any]) -> str:
     if not isinstance(payload, dict):
@@ -109,6 +142,15 @@ def _text_of(payload: Dict[str, Any]) -> str:
             continue  # booleans handled separately
         elif val is not None:
             parts.append(str(val))
+    # Include the nested detail.message (FastAPI error bodies).
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        for k in ("message", "msg", "error"):
+            v = detail.get(k)
+            if isinstance(v, str):
+                parts.append(v)
+    elif isinstance(detail, str):
+        parts.append(detail)
     return " ".join(parts).lower()
 
 
@@ -131,6 +173,18 @@ def parse(payload: Dict[str, Any], http_status: int | None = None) -> SparkResul
 
     text = _text_of(payload)
     msg = str(payload.get("message") or payload.get("msg") or payload.get("error") or "")
+
+    # Structured error code wins over everything (most reliable signal).
+    code = error_code(payload)
+    if code:
+        mapped = _ERROR_CODE_MAP.get(code.upper())
+        if mapped is not None:
+            detail = payload.get("detail")
+            dmsg = detail.get("message") if isinstance(detail, dict) else ""
+            return SparkResult(
+                status=mapped, raw=payload, message=str(dmsg or msg or code),
+                http_status=http_status, player_name=extract_player_name(payload),
+            )
 
     # Specific negative reasons win regardless of any boolean flag.
     if _match(text, _ACCOUNT_NOT_FOUND):

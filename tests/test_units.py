@@ -78,6 +78,15 @@ def test_parse_job_and_boolean_validity():
     assert parser.parse_job(bare).status is UnifiedStatus.VALID
 
 
+def test_parser_structured_error_codes():
+    # Real Spark error shape: {"detail": {"error": CODE, "message": ...}}
+    anf = {"detail": {"error": "INVALID_PLAYER_ID", "message": "Invalid player identifier."}}
+    assert parser.parse(anf).status is UnifiedStatus.ACCOUNT_NOT_FOUND
+    assert parser.parse_job(anf).status is UnifiedStatus.ACCOUNT_NOT_FOUND
+    assert parser.parse({"detail": {"error": "OUT_OF_STOCK"}}).status is UnifiedStatus.ERROR
+    assert parser.parse({"detail": {"error": "PLAYER_NOT_FOUND"}}).status is UnifiedStatus.ACCOUNT_NOT_FOUND
+
+
 def test_fsm_transitions():
     assert can_transition(OrderStatus.NEW, OrderStatus.WAITING_FOR_CODE)
     assert can_transition(OrderStatus.CHECKING, OrderStatus.VALID)
