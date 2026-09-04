@@ -216,9 +216,6 @@ class Config:
     # the per-poll long-poll hold (<=60); spark_max_wait bounds total polling.
     spark_job_wait: float = field(default_factory=lambda: _get_float("SPARK_JOB_WAIT", 25.0))
     spark_max_wait: float = field(default_factory=lambda: _get_float("SPARK_MAX_WAIT", 120.0))
-    # If the redeem result carries no player name, resolve it via /v1/player/
-    # lookup (costs ~0.25 request). Purely cosmetic for the success message.
-    spark_lookup: bool = field(default_factory=lambda: _get_bool("SPARK_LOOKUP", True))
     # When True (or when no URL is configured) the SparkChecker runs in mock
     # mode - no network calls. Flip to False once a real code sample confirms
     # the finished-job result shape in spark/parser.py.
@@ -256,9 +253,6 @@ class Config:
     # Spark endpoint helpers (derived from the base url).
     def spark_stock_redeem_url(self) -> str:
         return f"{self.spark_api_url}/v1/jobs/stock-redeem"
-
-    def spark_lookup_url(self) -> str:
-        return f"{self.spark_api_url}/v1/player/lookup"
 
     def spark_job_url(self, job_id: str) -> str:
         return f"{self.spark_api_url}/v1/jobs/{job_id}"

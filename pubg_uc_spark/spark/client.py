@@ -73,6 +73,9 @@ class SparkChecker:
         if not self.cfg.spark_api_key:
             raise SparkCriticalError("SPARK_API_KEY is not configured")
 
+        # Straight to stock-redeem - no separate lookup call (each request is
+        # billed and quota-limited). Account-not-found is read from the redeem
+        # result itself; the player name too, if the result carries it.
         job = self._post_job(
             self.cfg.spark_stock_redeem_url(),
             {"player_id": str(player_id), "picks": picks},
@@ -83,28 +86,8 @@ class SparkChecker:
             result = parser.parse_job(job, http_status=200)
             if result.status is UnifiedStatus.UNKNOWN:
                 raise SparkCriticalError(f"No job_id in Spark response: keys={list(job.keys())}")
-        else:
-            result = self._poll_job(job_id)
-        self._enrich_player_name(result, player_id)
-        return result
-
-    def _enrich_player_name(self, result: SparkResult, player_id: str) -> None:
-        """Fill result.player_name via player/lookup if missing (cosmetic)."""
-        if result.player_name or not self.cfg.spark_lookup:
-            return
-        if result.status is not UnifiedStatus.VALID:
-            return
-        try:
-            resp = requests.get(
-                self.cfg.spark_lookup_url(),
-                params={"player_id": str(player_id)},
-                headers=self._headers(),
-                timeout=self.cfg.spark_timeout,
-            )
-            if resp.status_code == 200:
-                result.player_name = parser.extract_player_name(self._json(resp))
-        except Exception:
-            log.debug("player/lookup failed for %s", mask_code(player_id))
+            return result
+        return self._poll_job(job_id)
 
     def _headers(self) -> Dict[str, str]:
         return {
