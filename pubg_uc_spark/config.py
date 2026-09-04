@@ -65,11 +65,16 @@ def _get_admin_ids() -> List[int]:
 
 @dataclass
 class LotConfig:
-    """Metadata for a single tracked FunPay lot."""
+    """Metadata for a single tracked FunPay lot.
+
+    ``denomination`` is the Spark stock "pick" key (the UC pack size, e.g.
+    ``"60"``). The number of packs to redeem is the FunPay order's own quantity,
+    so the Spark ``picks`` become ``{denomination: order_quantity}``.
+    """
 
     lot_id: str
     product: str
-    quantity: int = 1
+    denomination: str = "60"
 
 
 def _default_lots() -> Dict[str, LotConfig]:
@@ -77,8 +82,8 @@ def _default_lots() -> Dict[str, LotConfig]:
 
     Overridable via the ``LOTS`` env var (JSON), e.g.::
 
-        LOTS={"37330959": {"product": "PUBG 60 UC", "quantity": 60},
-              "40000000": {"product": "PUBG 120 UC", "quantity": 120}}
+        LOTS={"37330959": {"product": "PUBG 60 UC", "denomination": "60"},
+              "40000000": {"product": "PUBG 120 UC", "denomination": "120"}}
     """
     raw = os.environ.get("LOTS", "").strip()
     if raw:
@@ -88,7 +93,8 @@ def _default_lots() -> Dict[str, LotConfig]:
                 str(lid): LotConfig(
                     lot_id=str(lid),
                     product=str(meta.get("product", "")),
-                    quantity=int(meta.get("quantity", 1)),
+                    # accept "denomination" or legacy "quantity"
+                    denomination=str(meta.get("denomination", meta.get("quantity", "60"))),
                 )
                 for lid, meta in data.items()
             }
@@ -101,7 +107,7 @@ def _default_lots() -> Dict[str, LotConfig]:
         lot_id: LotConfig(
             lot_id=lot_id,
             product=_get("PRODUCT_NAME", "PUBG Mobile 60 UC"),
-            quantity=_get_int("PRODUCT_QUANTITY", 60),
+            denomination=_get("DENOMINATION", "60"),
         )
     }
 
@@ -110,63 +116,69 @@ def _default_lots() -> Dict[str, LotConfig]:
 class Messages:
     """Buyer-facing message templates (task spec, section 24.11).
 
-    NOTE: these are placeholders supplied by the developer until the real
-    texts are provided. Edit here or override via env vars ``MSG_*``.
-    ``{order_id}``, ``{product}``, ``{code_masked}`` placeholders are allowed.
+    Flow: after payment the bot stays silent; the buyer sends their PUBG UID and
+    the bot redeems UC from Spark stock and reports the result.
+
+    Placeholders available in every template: ``{order_id}``, ``{product}``,
+    ``{uid}``. Override any text via the matching ``MSG_*`` env var. These are
+    working drafts - confirm/adjust the wording.
     """
 
-    ask_code: str = field(
+    # Sent ONLY on an explicit admin resend (/uc_resend). The bot never messages
+    # the buyer automatically after payment.
+    ask_uid: str = field(
         default_factory=lambda: _get(
-            "MSG_ASK_CODE",
-            "Здравствуйте! Спасибо за заказ #{order_id} ({product}).\n"
-            "Пришлите, пожалуйста, код пополнения одним сообщением.",
+            "MSG_ASK_UID",
+            "По заказу #{order_id} ({product}) пришлите, пожалуйста, ваш PUBG ID "
+            "(только цифры, 9–11 знаков).",
         )
     )
     valid: str = field(
         default_factory=lambda: _get(
             "MSG_VALID",
-            "Код по заказу #{order_id} успешно проверен ✅. Спасибо за покупку!",
+            "Готово! На аккаунт (ID {uid}) начислено {product} по заказу "
+            "#{order_id} ✅. Спасибо за покупку!",
         )
     )
     invalid: str = field(
         default_factory=lambda: _get(
             "MSG_INVALID",
-            "Код по заказу #{order_id} не прошёл проверку ❌ (недействителен). "
-            "Проверьте, пожалуйста, и пришлите корректный код.",
-        )
-    )
-    already_used: str = field(
-        default_factory=lambda: _get(
-            "MSG_ALREADY_USED",
-            "Код по заказу #{order_id} уже был использован ранее ⚠️. "
-            "Пришлите, пожалуйста, неиспользованный код.",
+            "Не удалось начислить {product} на ID {uid} (заказ #{order_id}). "
+            "Проверьте ID или свяжитесь с продавцом.",
         )
     )
     account_not_found: str = field(
         default_factory=lambda: _get(
             "MSG_ACCOUNT_NOT_FOUND",
-            "По заказу #{order_id}: аккаунт не найден. Проверьте, пожалуйста, "
-            "данные и свяжитесь с продавцом.",
+            "Аккаунт с ID {uid} не найден (заказ #{order_id}). Проверьте, "
+            "пожалуйста, игровой ID и пришлите его ещё раз.",
         )
     )
     bad_format: str = field(
         default_factory=lambda: _get(
             "MSG_BAD_FORMAT",
-            "Не удалось распознать код в сообщении по заказу #{order_id}. "
-            "Пришлите код в правильном формате.",
+            "Это не похоже на игровой ID. Пришлите, пожалуйста, ваш PUBG ID — "
+            "только цифры, 9–11 знаков (заказ #{order_id}).",
+        )
+    )
+    error: str = field(
+        default_factory=lambda: _get(
+            "MSG_ERROR",
+            "При начислении по заказу #{order_id} возникла ошибка. Продавец "
+            "уведомлён, ожидайте, пожалуйста.",
         )
     )
     temporary_error: str = field(
         default_factory=lambda: _get(
             "MSG_TEMPORARY_ERROR",
-            "Проверка кода по заказу #{order_id} временно недоступна, "
-            "повторим автоматически. Пожалуйста, подождите.",
+            "Начисление по заказу #{order_id} временно задерживается, повторяем "
+            "автоматически. Пожалуйста, подождите.",
         )
     )
     duplicate: str = field(
         default_factory=lambda: _get(
             "MSG_DUPLICATE",
-            "Этот код по заказу #{order_id} уже принят в обработку, ожидайте "
+            "Этот ID по заказу #{order_id} уже принят в обработку, ожидайте "
             "результат.",
         )
     )
@@ -180,7 +192,7 @@ class Config:
     lots: Dict[str, LotConfig] = field(default_factory=_default_lots)
 
     # Spark HTTP API (api.pubgredeemerbot.com). SPARK_API_URL is the BASE url;
-    # endpoints are derived from it (/v1/jobs/check-code, /v1/jobs/{id}).
+    # endpoints are derived from it (/v1/jobs/stock-redeem, /v1/jobs/{id}).
     spark_api_url: str = field(default_factory=lambda: _get("SPARK_API_URL", "").rstrip("/"))
     spark_api_key: str = field(default_factory=lambda: _get("SPARK_API_KEY", ""))
     spark_timeout: float = field(default_factory=lambda: _get_float("SPARK_TIMEOUT", 30.0))
@@ -200,10 +212,12 @@ class Config:
     retry_delay: float = field(default_factory=lambda: _get_float("RETRY_DELAY", 5.0))
     retry_backoff: float = field(default_factory=lambda: _get_float("RETRY_BACKOFF", 2.0))
 
-    # Code format (section 9). Single source of truth for the pattern.
-    # Per the Spark API spec a UC voucher is exactly 18 letters/digits.
+    # UID format (section 9). Single source of truth for the pattern.
+    # A PUBG player UID is digits only, 9-11 long. Kept configurable so the
+    # rule can change without touching business logic. (Env: UID_PATTERN, with
+    # legacy CODE_PATTERN accepted as a fallback.)
     code_pattern: str = field(
-        default_factory=lambda: _get("CODE_PATTERN", r"[A-Za-z0-9]{18}")
+        default_factory=lambda: _get("UID_PATTERN", _get("CODE_PATTERN", r"[0-9]{9,11}"))
     )
 
     # Database (section 6). Separate file, does NOT touch FPC's own storage.
@@ -221,8 +235,11 @@ class Config:
     messages: Messages = field(default_factory=Messages)
 
     # Spark endpoint helpers (derived from the base url).
-    def spark_check_code_url(self) -> str:
-        return f"{self.spark_api_url}/v1/jobs/check-code"
+    def spark_stock_redeem_url(self) -> str:
+        return f"{self.spark_api_url}/v1/jobs/stock-redeem"
+
+    def spark_lookup_url(self) -> str:
+        return f"{self.spark_api_url}/v1/player/lookup"
 
     def spark_job_url(self, job_id: str) -> str:
         return f"{self.spark_api_url}/v1/jobs/{job_id}"

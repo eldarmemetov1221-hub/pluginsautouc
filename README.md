@@ -1,14 +1,19 @@
 # PUBG UC Spark Auto-Checker — плагин для FunPayCardinal
 
-Плагин автоматизирует обработку заказов **PUBG Mobile UC (код пополнения)** на
-FunPay: отслеживает заказы по нужному лоту, принимает код от покупателя,
-проверяет его через **Spark** (`api.pubgredeemerbot.com`, HTTP REST), отвечает
-покупателю и ведёт учёт кодов с защитой от повторной обработки.
+Плагин автоматизирует продажу **PUBG Mobile UC** на FunPay: отслеживает заказы
+по нужному лоту, принимает от покупателя его **игровой UID**, начисляет UC из
+склада **Spark** (`api.pubgredeemerbot.com`), отвечает покупателю и ведёт учёт с
+защитой от повторной обработки.
 
-> Статус: **каркас (Вариант B)**. Проверка Spark работает в **mock-режиме** —
-> сетевые вызовы отключены. Реальный формат ответа Spark подставляется в один
-> файл (`pubg_uc_spark/spark/parser.py`) + метод `_check_http` в `client.py`,
-> остальной код не меняется.
+**Флоу продажи:** покупатель оплачивает → бот **молчит** (никаких сообщений
+после оплаты) → покупатель присылает свой **UID** → бот проверяет, что это UID
+(цифры, 9–11 знаков) → шлёт запрос на пополнение в Spark (`stock-redeem`) →
+сообщает результат.
+
+> Статус: транспорт Spark реализован по OpenAPI. Работает в **mock-режиме**
+> (`SPARK_MOCK=1`) — сетевых вызовов нет. Точный разбор ответа завершённого
+> job'а подставляется в один файл (`pubg_uc_spark/spark/parser.py`), остальной
+> код не меняется.
 
 ## Установка в FunPayCardinal
 
@@ -32,7 +37,7 @@ pubg_uc_spark/
   errors.py                  — таксономия ошибок (User / Temporary / Critical)
   funpay/orders.py           — разбор NEW_ORDER, резолв lot_id
   funpay/messenger.py        — отправка + анти-спам (send_once) + notify_admin
-  spark/client.py            — SparkChecker.check_code() (HTTP или mock)
+  spark/client.py            — SparkChecker.redeem() (job-API или mock)
   spark/parser.py            — Spark ответ → унифицированный статус (ЕДИНСТВЕННОЕ
                                место, знающее формат Spark)
   spark/models.py            — UnifiedStatus, SparkResult
@@ -40,37 +45,38 @@ pubg_uc_spark/
   database/models.py         — датаклассы + FSM (can_transition)
   database/repository.py     — идемпотентные записи, поиск, дедуп
   services/order_service.py  — FSM заказа + сообщения + применение результата
-  services/code_service.py   — извлечение/валидация/дедуп кода
+  services/code_service.py   — извлечение/валидация/дедуп UID
   services/retry_service.py  — воркер-поток + retry для временных ошибок
   services/admin_service.py  — админ-операции
-  utils/logger.py            — уровни логов + маскирование кода/секретов
-  utils/validators.py        — CODE_PATTERN, извлечение кода, hash
+  utils/logger.py            — уровни логов + маскирование UID/секретов
+  utils/validators.py        — UID_PATTERN, извлечение UID, hash
 ```
 
 ### Поток обработки
 
 ```
 NEW_ORDER → (дедуп события) → резолв lot_id → фильтр по LOTS →
-идемпотентное создание заказа → статус WAITING_FOR_CODE → запрос кода
+идемпотентное создание заказа → статус WAITING_FOR_CODE (МОЛЧА, без сообщения)
 
 NEW_MESSAGE → (дедуп по message_id) → активный заказ покупателя? →
-извлечение по CODE_PATTERN → дедуп кода → CODE_RECEIVED → CHECKING →
-retry_service (в отдельном потоке) → SparkChecker → parser → UnifiedStatus →
-apply_result: статус заказа/кода + сообщение покупателю + лог
+извлечение UID по UID_PATTERN → дедуп → CODE_RECEIVED → CHECKING →
+retry_service (в отдельном потоке) → SparkChecker.redeem() → parser →
+UnifiedStatus → apply_result: статус заказа + сообщение покупателю + лог
 ```
 
 ### Интеграция со Spark (`api.pubgredeemerbot.com`)
 
-Spark — **асинхронный job-API**. `SparkChecker.check_code()`:
+Spark — **асинхронный job-API**. `SparkChecker.redeem(player_id, picks)`:
 
 ```
-POST /v1/jobs/check-code  {"codes": ["<code>"]}   → job_id
+POST /v1/jobs/stock-redeem  {"player_id": uid, "picks": {"60": 1}} → job_id
 GET  /v1/jobs/{job_id}?wait=25  (long-poll, ≤60с) → ждём status=done/failed
 result.results[0] → parser.parse_job() → UnifiedStatus → бизнес-логика
 ```
 
 - Авторизация: заголовок `X-API-Key` (ключ из Telegram `@sparkucbot → API`).
-- Код: ровно **18** символов `[A-Za-z0-9]`, шлётся массивом `codes`.
+- UID: цифры, **9–11** знаков (`UID_PATTERN`).
+- `picks = {denomination: order_quantity}` — номинал лота из `LOTS`, количество из заказа FunPay.
 - HTTP-маппинг: `429/5xx/сеть` → временная ошибка (retry); `401/403` → критическая; `404` → критическая.
 
 Бизнес-логика зависит только от `UnifiedStatus`
@@ -78,21 +84,22 @@ result.results[0] → parser.parse_job() → UnifiedStatus → бизнес-ло
 Замена Spark или изменение формата ответа = правка только `parser.py`.
 
 > ⚠️ **Одно место требует реального примера.** В OpenAPI-схеме Spark тело
-> завершённого job'а описано пустым объектом, поэтому точные поля per-code
-> результата (какое поле = «валиден» / «уже использован» / «аккаунт не найден»)
+> завершённого job'а описано пустым объектом, поэтому точные поля результата
+> начисления (какое поле = «успех» / «аккаунт не найден» / «нет в наличии»)
 > пока не подтверждены. `parser.parse_job()` сделан устойчивым: сперва читает
-> булев флаг (`valid`/`is_valid`/`redeemable`), иначе матчит по ключевым словам
-> в текстовых полях. Пришлите один реальный JSON завершённого job'а — маппинг
+> булев флаг (`success`/`valid`/`redeemable`), иначе матчит по ключевым словам.
+> Пришлите один реальный JSON завершённого job'а `stock-redeem` — маппинг
 > зафиксируется точно, без изменений в остальном коде.
 
 ## Идемпотентность и защита от повторов
 
 - `orders.funpay_order_id` — UNIQUE (заказ создаётся один раз).
-- `codes (order_id, code_hash)` — UNIQUE (код на заказ — один раз).
+- `codes (order_id, code_hash)` — UNIQUE (UID на заказ — один раз). Один и тот
+  же UID на разных заказах разрешён (повторный покупатель).
 - `processed_events` — таблица уже обработанных событий и уже отправленных
   сообщений (`order:<id>`, `msg:<message_id>`, `sent:<key>`).
-- Успешно проверенный код повторно не проверяется; окончательно невалидный —
-  тоже (только через админ-команду `/uc_recheck`).
+- Успешно начисленный UID повторно не отправляется; окончательный негатив —
+  тоже (пере-проверка только через админ-команду `/uc_recheck`).
 
 ## Состояния заказа (FSM)
 
@@ -116,12 +123,12 @@ VALID | INVALID | ACCOUNT_NOT_FOUND | ALREADY_USED | ERROR | TEMPORARY_ERROR`,
 | `/uc_recheck <code_id>` | повторная проверка (обходит final-негатив) |
 | `/uc_cancel <code_id>` | отменить retry (пометить FAILED) |
 | `/uc_setstatus <order_id> <STATUS>` | форс-смена статуса заказа |
-| `/uc_resend <funpay_order_id>` | повторно отправить запрос кода |
+| `/uc_resend <funpay_order_id>` | вручную попросить у покупателя UID |
 
 ## Безопасность
 
 - Секреты только в `.env`, не в коде и не в логах.
-- Коды в логах маскируются: `ABCD****1234`.
+- UID/коды в логах маскируются: `1234****8901`.
 
 ## Тесты
 
@@ -130,21 +137,22 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-Покрыты сценарии секции 19 ТЗ: новый заказ, заказ без кода, валид/невалид,
-ACCOUNT_NOT_FOUND, уже использованный код, повторное сообщение, повторный
-event, timeout/500/недоступность Spark, критическая ошибка, восстановление
-после перезапуска, два заказа, один покупатель с несколькими заказами.
+Покрыты сценарии секции 19 ТЗ: новый заказ (молча), сообщение без UID,
+некорректный UID, валидный UID, отказ начисления, ACCOUNT_NOT_FOUND, нет в
+наличии, повторный UID, повторный event, timeout/500/недоступность Spark,
+критическая ошибка, восстановление после перезапуска, два заказа, один
+покупатель с несколькими заказами.
 
 ## Что нужно уточнить перед боевым запуском
 
-1. **Реальный JSON завершённого job'а** Spark (`GET /v1/jobs/{id}` после `done`)
-   для валидного и для невалидного/использованного кода → зафиксировать маппинг
-   в `parser.parse_job()`.
-2. **Тексты сообщений** покупателю (сейчас — заглушки в `config.py`).
+1. **Реальный JSON завершённого job'а** `stock-redeem` (`GET /v1/jobs/{id}`
+   после `done`) для успеха и для «аккаунт не найден» → зафиксировать маппинг в
+   `parser.parse_job()`.
+2. **Тексты сообщений** покупателю — черновики в `config.py`, нужно утвердить.
 3. **`resolve_lot_id`** — сверить с версией FunPayAPI в вашем FPC (способ
    получить offer id из заказа).
-4. Включить реальную проверку: `SPARK_MOCK=0` + `SPARK_API_KEY=<ключ>`
+4. Включить реальный режим: `SPARK_MOCK=0` + `SPARK_API_KEY=<ключ>`
    (endpoint уже настроен: `SPARK_API_URL=https://api.pubgredeemerbot.com`).
 
-Транспорт Spark (job-API, `X-API-Key`, формат кода 18 символов) уже реализован
-по OpenAPI-спецификации.
+Транспорт Spark (job-API `stock-redeem`, `X-API-Key`, UID 9–11 цифр) уже
+реализован по OpenAPI-спецификации.

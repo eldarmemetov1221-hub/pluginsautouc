@@ -15,20 +15,23 @@ from pubg_uc_spark.utils.validators import (
     is_valid_format,
 )
 
-PATTERN = r"[A-Za-z0-9]{18}"
-CODE18 = "a1B2c3D4e5F6g7H8i9"  # exactly 18 chars, per Spark spec
+PATTERN = r"[0-9]{9,11}"     # PUBG UID: digits, 9-11 long
+UID = "123456789"            # 9 digits
 
 
-def test_extract_code_from_message():
-    assert extract_first_code(f"вот код: {CODE18} спасибо", PATTERN) == CODE18
-    assert extract_first_code("нет кода тут", PATTERN) is None
-    assert extract_first_code("short", PATTERN) is None
+def test_extract_uid_from_message():
+    assert extract_first_code(f"вот мой id: {UID} спасибо", PATTERN) == UID
+    assert extract_first_code("нет id тут", PATTERN) is None
+    # A 12-digit run is NOT a valid UID and must not be partially matched.
+    assert extract_first_code("123456789012", PATTERN) is None
 
 
 def test_is_valid_format():
-    assert is_valid_format(CODE18, PATTERN)
-    assert not is_valid_format("tooshort123", PATTERN)   # < 18
-    assert not is_valid_format("bad code with spaces!!", PATTERN)
+    assert is_valid_format(UID, PATTERN)
+    assert is_valid_format("12345678901", PATTERN)       # 11 digits
+    assert not is_valid_format("12345", PATTERN)          # too short
+    assert not is_valid_format("123456789012", PATTERN)   # too long
+    assert not is_valid_format("12ab56789", PATTERN)      # not digits
     assert not is_valid_format("", PATTERN)
 
 

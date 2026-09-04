@@ -8,9 +8,15 @@ returned :class:`IntakeResult`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
+# A standalone run of digits that looks like a UID attempt but may be the wrong
+# length. Used to tell "malformed UID" apart from ordinary chatter so we can
+# reply with the bad_format hint instead of ignoring the message.
+_UID_ATTEMPT = re.compile(r"(?<!\w)\d{4,15}(?!\w)")
 
 from ..database.models import (
     CODE_FINAL_NEGATIVE,
@@ -49,10 +55,12 @@ class CodeService:
     def process(self, order: OrderRecord, text: str, message_id: str) -> IntakeResult:
         raw = extract_first_code(text, self.cfg.code_pattern)
         if not raw:
+            # No valid UID. If the buyer clearly tried to send an id (a digit
+            # run of the wrong length), hint at the format; else stay silent.
+            if _UID_ATTEMPT.search(text or ""):
+                log.info("[Order #%s] UID attempt has bad format", order.funpay_order_id)
+                return IntakeResult(IntakeAction.BAD_FORMAT)
             return IntakeResult(IntakeAction.NO_CODE)
-        if not is_valid_format(raw, self.cfg.code_pattern):
-            log.info("[Order #%s] Code has bad format", order.funpay_order_id)
-            return IntakeResult(IntakeAction.BAD_FORMAT)
 
         h = code_hash(raw)
 
@@ -67,16 +75,9 @@ class CodeService:
             # RECEIVED / CHECKING / TEMPORARY_ERROR -> still in flight.
             return IntakeResult(IntakeAction.DUPLICATE_INFLIGHT, existing)
 
-        # Same code already redeemed successfully on a DIFFERENT order?
-        anywhere = self.repo.find_code_by_hash_any_order(h)
-        if anywhere is not None and CodeStatus(anywhere.status) in CODE_SUCCESS:
-            log.warning(
-                "[Order #%s] Code %s already VALID on order_id=%s",
-                order.funpay_order_id,
-                mask_code(raw),
-                anywhere.order_id,
-            )
-            return IntakeResult(IntakeAction.GLOBAL_USED, anywhere)
+        # NOTE: the same UID legitimately appears across DIFFERENT orders (a
+        # repeat customer), so there is no cross-order "already used" guard -
+        # dedup is per (order_id, uid) only.
 
         record = CodeRecord(
             code=raw,

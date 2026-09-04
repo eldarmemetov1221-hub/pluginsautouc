@@ -1,16 +1,17 @@
-"""SparkChecker: the code-checking adapter (task spec, sections 3, 4, 11).
+"""SparkChecker: the redeem adapter (task spec, sections 3, 4, 11).
 
-Public contract - the ONLY thing business logic calls:
+Flow (per the buyer sending their PUBG UID): the bot redeems UC from Spark
+stock onto the buyer's account. Public contract:
 
     checker = SparkChecker(config)
-    result: SparkResult = checker.check_code(code)   # -> UnifiedStatus
+    result: SparkResult = checker.redeem(player_id, picks)   # -> UnifiedStatus
 
 Spark (api.pubgredeemerbot.com) is an ASYNCHRONOUS job API:
 
-    1. POST /v1/jobs/check-code   {"codes": ["<code>"]}      -> {job_id, status}
-    2. GET  /v1/jobs/{job_id}?wait=25                        -> poll until
-                                                               status done/failed
-    3. parse the finished job's result row -> UnifiedStatus
+    1. POST /v1/jobs/stock-redeem  {"player_id": uid, "picks": {"60": 1}}
+                                                              -> {job_id, status}
+    2. GET  /v1/jobs/{job_id}?wait=25   -> poll until status done/failed
+    3. parse the finished job's result -> UnifiedStatus
 
 Auth is the ``X-API-Key`` header. Transport failures map to the plugin's error
 taxonomy:
@@ -20,7 +21,7 @@ taxonomy:
 * understood job result           -> SparkResult
 
 Mock mode (``config.spark_mock``) needs no network and drives deterministic
-behaviour from magic substrings in the code - used by tests and local dev.
+behaviour from the leading digit of the UID - used by tests and local dev.
 """
 
 from __future__ import annotations
@@ -43,7 +44,6 @@ except Exception:  # pragma: no cover
 # Job lifecycle states (from the API docs).
 _DONE = {"done"}
 _FAILED = {"failed"}
-_PENDING = {"pending", "running", "queued", ""}
 
 
 class SparkChecker:
@@ -51,21 +51,21 @@ class SparkChecker:
         self.cfg = config
 
     # ------------------------------------------------------------------ #
-    def check_code(self, code: str) -> SparkResult:
-        """Check a single code and return a normalised result.
+    def redeem(self, player_id: str, picks: Dict[str, int]) -> SparkResult:
+        """Redeem ``picks`` (e.g. {"60": 1}) onto ``player_id``.
 
         Raises :class:`SparkTemporaryError` for retryable failures and
         :class:`SparkCriticalError` for unrecoverable ones.
         """
-        log.info("[Spark] Checking code %s", mask_code(code))
+        log.info("[Spark] Redeem picks=%s uid=%s", picks, mask_code(player_id))
         if self.cfg.spark_mock:
-            return self._check_mock(code)
-        return self._check_http(code)
+            return self._redeem_mock(player_id, picks)
+        return self._redeem_http(player_id, picks)
 
     # ------------------------------------------------------------------ #
     # Real HTTP transport (async job API).
     # ------------------------------------------------------------------ #
-    def _check_http(self, code: str) -> SparkResult:
+    def _redeem_http(self, player_id: str, picks: Dict[str, int]) -> SparkResult:
         if requests is None:  # pragma: no cover
             raise SparkCriticalError("requests is not installed")
         if not self.cfg.spark_api_url:
@@ -73,7 +73,10 @@ class SparkChecker:
         if not self.cfg.spark_api_key:
             raise SparkCriticalError("SPARK_API_KEY is not configured")
 
-        job = self._create_job(code)
+        job = self._post_job(
+            self.cfg.spark_stock_redeem_url(),
+            {"player_id": str(player_id), "picks": picks},
+        )
         job_id = self._extract_job_id(job)
         if not job_id:
             # Some deployments may answer synchronously with the result inline.
@@ -90,13 +93,10 @@ class SparkChecker:
             "X-API-Key": self.cfg.spark_api_key,
         }
 
-    def _create_job(self, code: str) -> Dict[str, Any]:
+    def _post_job(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
             resp = requests.post(
-                self.cfg.spark_check_code_url(),
-                json={"codes": [code]},
-                headers=self._headers(),
-                timeout=self.cfg.spark_timeout,
+                url, json=payload, headers=self._headers(), timeout=self.cfg.spark_timeout
             )
         except Exception as exc:
             raise SparkTemporaryError(f"Spark POST failed: {exc}") from exc
@@ -127,10 +127,10 @@ class SparkChecker:
                     )
                 return result
             if status in _FAILED:
-                # A failed job is a Spark-side failure. Treat as temporary so it
-                # can be retried; parser may still classify a code-level reason.
+                # A failed job: if the parser recognises a definitive reason
+                # (account not found / declined) surface it; otherwise retry.
                 result = parser.parse_job(job, http_status=resp.status_code)
-                if result.is_final_negative:
+                if result.is_final_negative or result.status is UnifiedStatus.ERROR:
                     return result
                 raise SparkTemporaryError(f"Spark job failed: {job.get('error') or job}")
 
@@ -165,24 +165,24 @@ class SparkChecker:
         return None
 
     # ------------------------------------------------------------------ #
-    # Deterministic mock (no network). Magic substrings drive the outcome.
+    # Deterministic mock (no network). Leading digit of the UID drives it.
     # ------------------------------------------------------------------ #
-    def _check_mock(self, code: str) -> SparkResult:
-        up = code.upper()
-        if "NOACC" in up:
-            row = {"code": code, "status": "error", "message": "account does not exist"}
-        elif "USED" in up:
-            row = {"code": code, "status": "used", "message": "code already used"}
-        elif "TEMP" in up or "ERR500" in up:
+    def _redeem_mock(self, player_id: str, picks: Dict[str, int]) -> SparkResult:
+        head = (player_id or "0")[0]
+        if head == "2":
+            row = {"player_id": player_id, "status": "error", "message": "account does not exist"}
+        elif head == "3":
             raise SparkTemporaryError("Mock temporary error")
-        elif "CRIT" in up:
+        elif head == "4":
             raise SparkCriticalError("Mock critical error")
-        elif "WEIRD" in up:
-            row = {"code": code, "foo": "bar"}  # -> UNKNOWN -> critical
-        elif "GOOD" in up or "VALID" in up:
-            row = {"code": code, "valid": True, "message": "redeemable"}
+        elif head == "5":
+            row = {"player_id": player_id, "status": "error", "message": "out of stock"}
+        elif head == "6":
+            row = {"player_id": player_id, "foo": "bar"}  # -> UNKNOWN -> critical
+        elif head == "7":
+            row = {"player_id": player_id, "success": False, "message": "redeem declined"}
         else:
-            row = {"code": code, "valid": False, "message": "invalid code"}
+            row = {"player_id": player_id, "success": True, "message": "redeemed successfully"}
 
         job = {"status": "done", "result": {"results": [row]}}
         result = parser.parse_job(job, http_status=200)

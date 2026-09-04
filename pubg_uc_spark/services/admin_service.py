@@ -96,13 +96,13 @@ class AdminService:
         return f"Order #{funpay_order_id} status forced to {new_status.value}."
 
     def resend_ask(self, funpay_order_id: str) -> str:
-        """Re-send the 'send me the code' message to the buyer."""
+        """Manually ask the buyer for their UID (the bot never does this auto)."""
         order = self.repo.get_order_by_funpay_id(str(funpay_order_id))
         if not order:
             return f"Order #{funpay_order_id} not found."
         lot = self.cfg.lot(order.lot_id)
-        text = self.cfg.messages.ask_code.format(
-            order_id=order.funpay_order_id, product=(lot.product if lot else "")
+        text = self.cfg.messages.ask_uid.format(
+            order_id=order.funpay_order_id, product=(lot.product if lot else ""), uid=""
         )
         # Force send (bypass the once-guard) since the admin explicitly asked.
         ok = self.orders.messenger.send(order.chat_id, text)

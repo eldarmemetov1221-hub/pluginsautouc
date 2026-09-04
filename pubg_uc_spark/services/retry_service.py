@@ -33,14 +33,16 @@ class RetryService:
     def __init__(
         self,
         config,
-        checker,
+        check_fn: Callable[[int], "SparkResult"],
         result_handler: ResultHandler,
         *,
         async_mode: bool = True,
         sleep_fn: Callable[[float], None] | None = None,
     ):
         self.cfg = config
-        self.checker = checker
+        # check_fn(code_id) performs the actual Spark redeem and returns a
+        # SparkResult, or raises SparkTemporaryError / SparkCriticalError.
+        self.check_fn = check_fn
         self.result_handler = result_handler
         self.async_mode = async_mode
         import time
@@ -91,7 +93,7 @@ class RetryService:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                result = self.checker.check_code(self._code_of(code_id))
+                result = self.check_fn(code_id)
                 self.result_handler(code_id, result, None, attempt)
                 return
             except SparkTemporaryError as exc:
@@ -118,15 +120,3 @@ class RetryService:
 
         # Retries exhausted on a temporary error.
         self.result_handler(code_id, None, last_error, max_attempts)
-
-    # The worker only has a code_id; the actual code string is fetched lazily
-    # through the handler-provided resolver to avoid holding it in the queue.
-    _code_resolver: Callable[[int], str] | None = None
-
-    def set_code_resolver(self, resolver: Callable[[int], str]) -> None:
-        self._code_resolver = resolver
-
-    def _code_of(self, code_id: int) -> str:
-        if self._code_resolver is None:
-            raise CriticalError("RetryService code resolver not configured")
-        return self._code_resolver(code_id)

@@ -48,6 +48,15 @@ _ALREADY_USED = (
     "used code",
     "already claimed",
 )
+# Definitive operational failure - not the buyer's fault, needs admin/restock.
+_OUT_OF_STOCK = (
+    "out of stock",
+    "no stock",
+    "insufficient stock",
+    "sold out",
+    "stock empty",
+    "no codes",
+)
 _INVALID = (
     "invalid",
     "not valid",
@@ -106,6 +115,8 @@ def parse(payload: Dict[str, Any], http_status: int | None = None) -> SparkResul
     # Specific negative reasons win regardless of any boolean flag.
     if _match(text, _ACCOUNT_NOT_FOUND):
         status = UnifiedStatus.ACCOUNT_NOT_FOUND
+    elif _match(text, _OUT_OF_STOCK):
+        status = UnifiedStatus.ERROR
     elif _match(text, _ALREADY_USED):
         status = UnifiedStatus.ALREADY_USED
     else:

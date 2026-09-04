@@ -25,10 +25,11 @@ log = get_logger("order")
 
 
 # Spark UnifiedStatus -> (code status, order status, message attribute)
+# UnifiedStatus -> (code status, order status, buyer-message attribute)
 _RESULT_MAP = {
     UnifiedStatus.VALID: (CodeStatus.VALID, OrderStatus.VALID, "valid"),
     UnifiedStatus.INVALID: (CodeStatus.INVALID, OrderStatus.INVALID, "invalid"),
-    UnifiedStatus.ALREADY_USED: (CodeStatus.ALREADY_USED, OrderStatus.ALREADY_USED, "already_used"),
+    UnifiedStatus.ALREADY_USED: (CodeStatus.ALREADY_USED, OrderStatus.ALREADY_USED, "invalid"),
     UnifiedStatus.ACCOUNT_NOT_FOUND: (
         CodeStatus.ACCOUNT_NOT_FOUND,
         OrderStatus.ACCOUNT_NOT_FOUND,
@@ -46,10 +47,27 @@ class OrderService:
         self.codes = CodeService(config, repo)
 
     # ------------------------------------------------------------------ #
-    # New order (section 2, steps 1-6)
+    # Message formatting helpers
+    # ------------------------------------------------------------------ #
+    def _product(self, order: OrderRecord) -> str:
+        lot = self.cfg.lot(order.lot_id)
+        return lot.product if lot else ""
+
+    def _fmt(self, order: OrderRecord, template: str, uid: str = "") -> str:
+        return template.format(
+            order_id=order.funpay_order_id, product=self._product(order), uid=uid
+        )
+
+    # ------------------------------------------------------------------ #
+    # New order (section 2)
     # ------------------------------------------------------------------ #
     def handle_new_order(self, info: OrderRecord) -> Optional[OrderRecord]:
-        """Idempotently register a new order and ask the buyer for a code."""
+        """Idempotently register a new order and wait (silently) for the UID.
+
+        Per the sale flow, the bot sends NOTHING to the buyer after payment; it
+        just moves the order to WAITING_FOR_CODE and waits for the buyer to send
+        their PUBG UID.
+        """
         order = self.repo.create_order(info)
         self.repo.add_log(
             "order_seen",
@@ -65,20 +83,9 @@ class OrderService:
         )
 
         if OrderStatus(order.status) == OrderStatus.NEW:
-            if self.repo.set_order_status(order.id, OrderStatus.WAITING_FOR_CODE):
-                self._ask_for_code(order)
+            self.repo.set_order_status(order.id, OrderStatus.WAITING_FOR_CODE)
+            log.info("[Order #%s] Waiting for UID (no message sent)", order.funpay_order_id)
         return self.repo.get_order(order.id)
-
-    def _ask_for_code(self, order: OrderRecord) -> None:
-        lot = self.cfg.lot(order.lot_id)
-        text = self.cfg.messages.ask_code.format(
-            order_id=order.funpay_order_id,
-            product=(lot.product if lot else ""),
-        )
-        sent = self.messenger.send_once(f"ask:{order.id}", order.chat_id, text)
-        if sent:
-            log.info("[Order #%s] Waiting for code", order.funpay_order_id)
-            self.repo.add_log("ask_code", "asked buyer for code", order_id=order.id)
 
     # ------------------------------------------------------------------ #
     # Incoming buyer message (section 2 steps 5-7, section 8)
@@ -103,31 +110,27 @@ class OrderService:
         if action == IntakeAction.NO_CODE:
             return  # ordinary chatter, ignore silently
         if action == IntakeAction.BAD_FORMAT:
-            self.messenger.send(
-                chat_id, self.cfg.messages.bad_format.format(order_id=order.funpay_order_id)
-            )
+            self.messenger.send(chat_id, self._fmt(order, self.cfg.messages.bad_format))
             return
         if action in (
             IntakeAction.DUPLICATE_INFLIGHT,
             IntakeAction.ALREADY_PROCESSED,
             IntakeAction.ALREADY_NEGATIVE,
-            IntakeAction.GLOBAL_USED,
         ):
-            # Anti-spam: one duplicate notice per code (section 10).
+            # Anti-spam: one duplicate notice per UID (section 10).
+            uid = result.code.code if result.code else ""
             key = f"dup:{result.code.code_hash}" if result.code else f"dup:{order.id}"
-            self.messenger.send_once(
-                key, chat_id, self.cfg.messages.duplicate.format(order_id=order.funpay_order_id)
-            )
-            log.info("[Order #%s] Duplicate/known code (%s)", order.funpay_order_id, action.value)
+            self.messenger.send_once(key, chat_id, self._fmt(order, self.cfg.messages.duplicate, uid))
+            log.info("[Order #%s] Duplicate/known UID (%s)", order.funpay_order_id, action.value)
             return
 
         # action == ENQUEUE
         code = result.code
-        self.repo.add_log("code_received", "", order_id=order.id, code_id=code.id)
+        self.repo.add_log("uid_received", "", order_id=order.id, code_id=code.id)
         self.repo.set_order_status(order.id, OrderStatus.CODE_RECEIVED)
         self.repo.set_order_status(order.id, OrderStatus.CHECKING)
         self.repo.update_code(code.id, status=CodeStatus.CHECKING)
-        log.info("[Order #%s] Enqueue code check", order.funpay_order_id)
+        log.info("[Order #%s] Enqueue redeem", order.funpay_order_id)
         self.retry.enqueue(code.id)
 
     # ------------------------------------------------------------------ #
@@ -149,7 +152,9 @@ class OrderService:
 
         self.repo.update_code(code_id, attempts=attempts)
 
-        # --- Success / definitive negative outcomes ---
+        uid = code.code
+
+        # --- Success / definitive buyer-facing outcomes ---
         if result is not None and result.status in _RESULT_MAP:
             code_status, order_status, msg_attr = _RESULT_MAP[result.status]
             reason = "account_not_found" if result.status is UnifiedStatus.ACCOUNT_NOT_FOUND else ""
@@ -166,10 +171,33 @@ class OrderService:
             self.repo.add_log(
                 "spark_result", result.status.value, order_id=code.order_id, code_id=code_id
             )
-            text = getattr(self.cfg.messages, msg_attr).format(order_id=oid)
             if order and order.chat_id:
+                text = self._fmt(order, getattr(self.cfg.messages, msg_attr), uid)
                 self.messenger.send_once(f"result:{code_id}", order.chat_id, text)
             self.repo.add_log("buyer_notified", msg_attr, order_id=code.order_id, code_id=code_id)
+            return
+
+        # --- Operational error we understand (e.g. out of stock) ---
+        if result is not None and result.status is UnifiedStatus.ERROR:
+            self.repo.update_code(
+                code_id,
+                status=CodeStatus.FAILED,
+                spark_status=result.status.value,
+                error_message=result.message or "operational error",
+                checked=True,
+            )
+            if order:
+                self.repo.set_order_status(order.id, OrderStatus.ERROR)
+            log.error("[Order #%s] Operational error: %s", oid, result.message)
+            self.repo.add_log(
+                "spark_error", result.message, level="ERROR",
+                order_id=code.order_id, code_id=code_id,
+            )
+            if order and order.chat_id:
+                self.messenger.send_once(
+                    f"result:{code_id}", order.chat_id, self._fmt(order, self.cfg.messages.error, uid)
+                )
+            self._notify_admin(f"🛑 Order #{oid}: Spark error: {result.message}")
             return
 
         # --- Temporary error, retries exhausted (still retriable later) ---
@@ -191,12 +219,12 @@ class OrderService:
                 self.messenger.send_once(
                     f"temp:{code_id}",
                     order.chat_id,
-                    self.cfg.messages.temporary_error.format(order_id=oid),
+                    self._fmt(order, self.cfg.messages.temporary_error, uid),
                 )
             self._notify_admin(f"⚠️ Order #{oid}: temporary error after {attempts} attempts: {error}")
             return
 
-        # --- Critical / unknown -> final failure, admin only ---
+        # --- Critical / unknown -> final failure; tell buyer + admin ---
         self.repo.update_code(
             code_id,
             status=CodeStatus.FAILED,
@@ -211,6 +239,10 @@ class OrderService:
             "critical_error", str(error), level="CRITICAL",
             order_id=code.order_id, code_id=code_id,
         )
+        if order and order.chat_id:
+            self.messenger.send_once(
+                f"result:{code_id}", order.chat_id, self._fmt(order, self.cfg.messages.error, uid)
+            )
         self._notify_admin(f"🛑 Order #{oid}: critical error: {error}")
 
     # ------------------------------------------------------------------ #

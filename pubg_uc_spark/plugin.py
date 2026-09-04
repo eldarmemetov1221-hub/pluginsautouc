@@ -13,6 +13,7 @@ from typing import Optional
 from .config import Config, get_config
 from .database.db import Database
 from .database.repository import Repository
+from .errors import SparkCriticalError
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
 from .services.admin_service import AdminService
@@ -34,24 +35,28 @@ class Plugin:
         self.repo = Repository(self.db)
         self.messenger = FunPayMessenger(cardinal, self.cfg, self.repo)
         self.checker = SparkChecker(self.cfg)
-        # retry needs the order service's result handler; break the cycle by
-        # constructing retry first with a late-bound handler.
+        # retry calls _perform_check(code_id) and reports via _on_result.
         self.retry = RetryService(
-            self.cfg, self.checker, self._on_result, async_mode=async_mode
+            self.cfg, self._perform_check, self._on_result, async_mode=async_mode
         )
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
         self.admin = AdminService(self.cfg, self.repo, self.orders)
-        self.retry.set_code_resolver(self._resolve_code)
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
         self.orders.apply_result(code_id, result, error, attempts)
 
-    def _resolve_code(self, code_id: int) -> str:
+    def _perform_check(self, code_id: int):
+        """Build the Spark redeem request for a stored UID and run it."""
         code = self.repo.get_code(code_id)
         if code is None:
-            raise RuntimeError(f"code_id {code_id} vanished")
-        return code.code
+            raise SparkCriticalError(f"code_id {code_id} vanished")
+        order = self.repo.get_order(code.order_id) if code.order_id else None
+        lot = self.cfg.lot(order.lot_id) if order else None
+        denomination = lot.denomination if lot else "60"
+        quantity = max(1, order.quantity if order else 1)
+        picks = {denomination: quantity}
+        return self.checker.redeem(code.code, picks)
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:

@@ -16,14 +16,16 @@ def compile_pattern(pattern: str) -> "re.Pattern[str]":
 
 
 def extract_codes(text: str, pattern: str) -> List[str]:
-    """Return all substrings in ``text`` that match ``pattern``.
+    """Return all standalone tokens in ``text`` that match ``pattern``.
 
-    Used to pull a code out of a free-form buyer message. Returns matches in
-    order of appearance, de-duplicated while preserving order.
+    Used to pull a UID/code out of a free-form buyer message. The pattern is
+    wrapped in ``(?<!\\w)...(?!\\w)`` boundaries so a longer run is NOT partially
+    matched - e.g. with ``[0-9]{9,11}`` a 12-digit string yields no match rather
+    than its first 11 digits. Matches are returned in order, de-duplicated.
     """
     if not text:
         return []
-    rx = compile_pattern(pattern)
+    rx = re.compile(rf"(?<!\w)(?:{pattern})(?!\w)")
     seen: set[str] = set()
     out: List[str] = []
     for m in rx.finditer(text):
