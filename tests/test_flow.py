@@ -59,12 +59,16 @@ def test_message_without_uid_ignored(plugin, cardinal):
     assert cardinal.sent == []
 
 
-# 2b. A malformed "UID" (not 9-11 digits) -> bad_format reply, no redeem.
-def test_bad_uid_format(plugin, cardinal):
+# 2b. A malformed "UID" (not 9-11 digits) -> bad_format reply once, no redeem.
+def test_bad_uid_format_hint_once(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "1003b"))
-    _msg(plugin, cardinal, "buyer-1", "chat-1", "мой id 12345", "mbf")  # too short
+    _msg(plugin, cardinal, "buyer-1", "chat-1", "мой id 12345", "mbf1")   # too short
+    _msg(plugin, cardinal, "buyer-1", "chat-1", "12345678", "mbf2")       # 8 digits
     assert _order_status(plugin, "1003b") == OrderStatus.WAITING_FOR_CODE.value
-    assert any("игровой ID" in t for t in cardinal.texts_to("chat-1"))
+    hints = [t for t in cardinal.texts_to("chat-1") if "игровой ID" in t]
+    assert len(hints) == 1  # hint sent once, then silent
+    # no code stored, no redeem attempted
+    assert _codes(plugin, "1003b") == []
 
 
 # 3. Valid UID -> VALID + success message mentioning the UID.

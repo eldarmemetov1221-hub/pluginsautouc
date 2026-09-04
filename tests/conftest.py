@@ -62,7 +62,7 @@ def cfg(tmp_path):
     c.max_retries = 3
     c.retry_delay = 0.0
     c.retry_backoff = 1.0
-    c.code_pattern = r"[A-Za-z0-9]{8,32}"
+    c.code_pattern = r"[0-9]{9,11}"
     c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", 60)}
     c.admin_ids = [111]
     return c

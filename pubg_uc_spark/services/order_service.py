@@ -113,7 +113,10 @@ class OrderService:
         if action == IntakeAction.NO_CODE:
             return  # ordinary chatter, ignore silently
         if action == IntakeAction.BAD_FORMAT:
-            self.messenger.send(chat_id, self._fmt(order, self.cfg.messages.bad_format))
+            # Send the format hint once per order; stay silent on repeats.
+            self.messenger.send_once(
+                f"badfmt:{order.id}", chat_id, self._fmt(order, self.cfg.messages.bad_format)
+            )
             return
         if action in (
             IntakeAction.DUPLICATE_INFLIGHT,
