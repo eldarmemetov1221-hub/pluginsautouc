@@ -136,8 +136,11 @@ class Messages:
     valid: str = field(
         default_factory=lambda: _get(
             "MSG_VALID",
-            "Готово! На аккаунт (ID {uid}) начислено {product} по заказу "
-            "#{order_id} ✅. Спасибо за покупку!",
+            "✅ Успешное пополнение {product}\n\n"
+            "🆔 ID игрока: {uid}\n"
+            "👤 Имя игрока: {player_name}\n\n"
+            "Спасибо за покупку! Не забудьте подтвердить оплату в разделе "
+            "покупки!🤝",
         )
     )
     invalid: str = field(
@@ -200,6 +203,9 @@ class Config:
     # the per-poll long-poll hold (<=60); spark_max_wait bounds total polling.
     spark_job_wait: float = field(default_factory=lambda: _get_float("SPARK_JOB_WAIT", 25.0))
     spark_max_wait: float = field(default_factory=lambda: _get_float("SPARK_MAX_WAIT", 120.0))
+    # If the redeem result carries no player name, resolve it via /v1/player/
+    # lookup (costs ~0.25 request). Purely cosmetic for the success message.
+    spark_lookup: bool = field(default_factory=lambda: _get_bool("SPARK_LOOKUP", True))
     # When True (or when no URL is configured) the SparkChecker runs in mock
     # mode - no network calls. Flip to False once a real code sample confirms
     # the finished-job result shape in spark/parser.py.

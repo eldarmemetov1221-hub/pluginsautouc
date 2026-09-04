@@ -53,9 +53,12 @@ class OrderService:
         lot = self.cfg.lot(order.lot_id)
         return lot.product if lot else ""
 
-    def _fmt(self, order: OrderRecord, template: str, uid: str = "") -> str:
+    def _fmt(self, order: OrderRecord, template: str, uid: str = "", player_name: str = "") -> str:
         return template.format(
-            order_id=order.funpay_order_id, product=self._product(order), uid=uid
+            order_id=order.funpay_order_id,
+            product=self._product(order),
+            uid=uid,
+            player_name=player_name,
         )
 
     # ------------------------------------------------------------------ #
@@ -172,7 +175,9 @@ class OrderService:
                 "spark_result", result.status.value, order_id=code.order_id, code_id=code_id
             )
             if order and order.chat_id:
-                text = self._fmt(order, getattr(self.cfg.messages, msg_attr), uid)
+                text = self._fmt(
+                    order, getattr(self.cfg.messages, msg_attr), uid, player_name=result.player_name
+                )
                 self.messenger.send_once(f"result:{code_id}", order.chat_id, text)
             self.repo.add_log("buyer_notified", msg_attr, order_id=code.order_id, code_id=code_id)
             return

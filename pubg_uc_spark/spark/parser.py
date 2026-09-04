@@ -78,6 +78,26 @@ _VALID = (
 # Textual fields scanned for keywords.
 _TEXT_KEYS = ("status", "result", "state", "message", "msg", "error", "reason", "detail", "code_status")
 
+# Fields that may carry the resolved player/character name.
+_NAME_KEYS = ("player_name", "character_name", "nickname", "nick", "ign", "name", "username")
+
+
+def extract_player_name(payload: Dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in _NAME_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    # Sometimes nested under order_details / player.
+    for nest in ("order_details", "player", "account"):
+        sub = payload.get(nest)
+        if isinstance(sub, dict):
+            name = extract_player_name(sub)
+            if name:
+                return name
+    return ""
+
 
 def _text_of(payload: Dict[str, Any]) -> str:
     parts = []
@@ -133,7 +153,13 @@ def parse(payload: Dict[str, Any], http_status: int | None = None) -> SparkResul
             status = UnifiedStatus.UNKNOWN
             log.warning("Unrecognised Spark row: keys=%s", list(payload.keys()))
 
-    return SparkResult(status=status, raw=payload, message=msg, http_status=http_status)
+    return SparkResult(
+        status=status,
+        raw=payload,
+        message=msg,
+        http_status=http_status,
+        player_name=extract_player_name(payload),
+    )
 
 
 def _first_row(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,4 +183,10 @@ def parse_job(job: Dict[str, Any], http_status: int | None = None) -> SparkResul
     if not isinstance(job, dict):
         return SparkResult(UnifiedStatus.UNKNOWN, raw={"_raw": job}, http_status=http_status)
     row = _first_row(job)
-    return parse(row, http_status=http_status)
+    result = parse(row, http_status=http_status)
+    # The player name may live at the job/result level rather than in the row.
+    if not result.player_name:
+        result.player_name = extract_player_name(job) or extract_player_name(
+            job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+        )
+    return result

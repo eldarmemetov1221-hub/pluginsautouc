@@ -73,7 +73,11 @@ def test_valid_uid(plugin, cardinal):
     _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "m2")
     assert _order_status(plugin, "1004") == OrderStatus.VALID.value
     assert _codes(plugin, "1004")[0].status == CodeStatus.VALID.value
-    assert any("начислено" in t or "✅" in t for t in cardinal.texts_to("chat-1"))
+    success = [t for t in cardinal.texts_to("chat-1") if "Успешное пополнение" in t]
+    assert success, cardinal.sent
+    # UID and resolved player name are rendered into the message.
+    assert VALID in success[0]
+    assert "MockPlayer" in success[0]
 
 
 # 4. Redeem declined -> INVALID.

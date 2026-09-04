@@ -30,6 +30,7 @@ class SparkResult:
     raw: Dict[str, Any] = field(default_factory=dict)
     message: str = ""
     http_status: Optional[int] = None
+    player_name: str = ""  # resolved character/nick name, when Spark returns it
 
     @property
     def is_success(self) -> bool:
