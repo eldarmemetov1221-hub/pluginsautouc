@@ -49,6 +49,8 @@ class FunPayMessenger:
             return
         for admin_id in self.cfg.admin_ids:
             try:
-                bot.send_message(admin_id, text)
+                # Plain text: FPC's bot defaults to HTML parsing, which would
+                # reject any '<...>' in the message with a 400 error.
+                bot.send_message(admin_id, text, parse_mode=None)
             except Exception:
                 log.exception("Failed to notify admin %s", admin_id)

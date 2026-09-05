@@ -202,8 +202,11 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         return cfg.is_admin(getattr(getattr(message, "from_user", None), "id", None))
 
     def reply(message, text):
+        # parse_mode=None: send as plain text. FPC's bot defaults to HTML
+        # parsing, which would reject any '<...>' in our replies (e.g. usage
+        # hints like "stall <минут>") with a 400 "Unsupported start tag".
         try:
-            bot.reply_to(message, text)
+            bot.reply_to(message, text, parse_mode=None)
         except Exception:
             log.exception("Failed to reply to admin command")
 
