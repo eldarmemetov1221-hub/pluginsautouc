@@ -202,11 +202,12 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         return cfg.is_admin(getattr(getattr(message, "from_user", None), "id", None))
 
     def reply(message, text):
-        # parse_mode=None: send as plain text. FPC's bot defaults to HTML
-        # parsing, which would reject any '<...>' in our replies (e.g. usage
-        # hints like "stall <минут>") with a 400 "Unsupported start tag".
+        # parse_mode="" forces plain text. NOTE: parse_mode=None does NOT - in
+        # telebot None means "use the bot's default", and FPC sets HTML, which
+        # rejects any '<...>' in our replies (e.g. "stall <минут>") with a 400
+        # "Unsupported start tag". An empty string disables parsing entirely.
         try:
-            bot.reply_to(message, text, parse_mode=None)
+            bot.reply_to(message, text, parse_mode="")
         except Exception:
             log.exception("Failed to reply to admin command")
 

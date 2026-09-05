@@ -39,7 +39,7 @@ class AdminService:
             "/uc_skip <order_id> — не начислять (если выдали вручную)\n"
             "/uc_backfill — подтянуть заказы, пропущенные во время простоя "
             "(зарегистрировать и, если покупатель уже прислал UID, начислить)\n"
-            "/uc_watchdog [on|off|stall <мин>] — статус/управление сторожем "
+            "/uc_watchdog [on|off|stall N] — статус/управление сторожем "
             "(автоперезапуск при зависании)"
         )
 
@@ -163,7 +163,7 @@ class AdminService:
 
             /uc_watchdog                 - show status
             /uc_watchdog on | off        - enable / disable auto-restart
-            /uc_watchdog stall <minutes> - set the silence threshold
+            /uc_watchdog stall N         - set the silence threshold (minutes)
         """
         if self.watchdog is None:
             return "Watchdog control недоступен (не настроен)."
@@ -180,7 +180,7 @@ class AdminService:
                     "пока не включишь обратно.") if ok else "Не удалось записать настройку."
         if sub in ("stall", "тишина", "time"):
             if len(parts) < 2 or not parts[1].isdigit():
-                return "Usage: /uc_watchdog stall <минут>"
+                return "Использование: /uc_watchdog stall 15  (число минут)"
             ok = self.watchdog.set_stall_minutes(int(parts[1]))
             return (f"✅ Порог тишины: {int(parts[1])} мин." if ok
                     else "Не удалось записать настройку.")
@@ -197,7 +197,7 @@ class AdminService:
             f"  Состояние: {'включён' if data['enabled'] else 'ВЫКЛЮЧЕН'}\n"
             f"  Порог тишины: {data['stall_minutes']} мин\n"
             f"  Последнее событие FunPay: {age_txt}\n\n"
-            "Команды: /uc_watchdog on | off | stall <минут>"
+            "Команды: /uc_watchdog on | off | stall N (минут)"
         )
 
     def resend_ask(self, funpay_order_id: str) -> str:
