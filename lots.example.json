@@ -1,0 +1,14 @@
+{
+  "37330959":   {"product": "60 UC",   "uc": "60",   "picks": {"60": 1}},
+  "PUT_ID_120": {"product": "120 UC",  "uc": "120",  "picks": {"60": 2}},
+  "PUT_ID_180": {"product": "180 UC",  "uc": "180",  "picks": {"60": 3}},
+  "PUT_ID_300": {"product": "300 UC",  "uc": "300",  "picks": {"325": 1}},
+  "PUT_ID_325": {"product": "325 UC",  "uc": "325",  "picks": {"325": 1}},
+  "PUT_ID_360": {"product": "360 UC",  "uc": "360",  "picks": {"325": 1, "60": 1}},
+  "PUT_ID_445": {"product": "445 UC",  "uc": "445",  "picks": {"325": 1, "60": 2}},
+  "PUT_ID_600": {"product": "600 UC",  "uc": "600",  "picks": {"660": 1}},
+  "PUT_ID_660": {"product": "660 UC",  "uc": "660",  "picks": {"660": 1}},
+  "PUT_ID_720": {"product": "720 UC",  "uc": "720",  "picks": {"660": 1, "60": 1}},
+  "PUT_ID_1045":{"product": "1045 UC", "uc": "1045", "picks": {"660": 1, "325": 1, "60": 1}},
+  "PUT_ID_1320":{"product": "1320 UC", "uc": "1320", "picks": {"660": 2}}
+}

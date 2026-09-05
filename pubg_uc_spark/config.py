@@ -118,6 +118,15 @@ def _default_lots() -> Dict[str, LotConfig]:
         }
     """
     raw = os.environ.get("LOTS", "").strip()
+    # Alternatively point to a JSON file (e.g. lots.json) via LOTS_FILE.
+    if not raw:
+        lots_file = os.environ.get("LOTS_FILE", "").strip()
+        if lots_file and os.path.isfile(lots_file):
+            try:
+                with open(lots_file, encoding="utf-8") as fh:
+                    raw = fh.read().strip()
+            except OSError:
+                raw = ""
     if raw:
         try:
             data = json.loads(raw)
