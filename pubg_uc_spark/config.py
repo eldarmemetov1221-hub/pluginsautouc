@@ -383,6 +383,13 @@ class Config:
     watchdog_stall_minutes: int = field(
         default_factory=lambda: max(1, _get_int("WATCHDOG_STALL_MINUTES", 15))
     )
+    # Only recover open sales created within this many minutes (the outage
+    # window). 0 = no limit (scan all open sales). Keeps backfill from re-reading
+    # history for long-standing unconfirmed orders. Fail-open: a sale whose date
+    # can't be determined reliably is NOT skipped.
+    backfill_max_age_minutes: int = field(
+        default_factory=lambda: max(0, _get_int("BACKFILL_MAX_AGE_MINUTES", 30))
+    )
     # How many sales pages to scan (each page ~100 sales). Bounds API load.
     backfill_max_pages: int = field(default_factory=lambda: max(1, _get_int("BACKFILL_MAX_PAGES", 3)))
     # How many of the most recent chat messages to scan per order for a UID.

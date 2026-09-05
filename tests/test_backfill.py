@@ -272,6 +272,38 @@ def test_watchdog_mode_runs_and_consumes_trigger(tmp_path):
     p.stop()
 
 
+def test_backfill_age_filter_skips_old_keeps_recent(tmp_path):
+    import datetime as dt
+
+    old = _paid_sale("OLD1")
+    old.date = dt.datetime.now() - dt.timedelta(hours=2)      # 120 min ago
+    recent = _paid_sale("NEW1")
+    recent.date = dt.datetime.now() - dt.timedelta(minutes=5)  # within window
+    cfg = _cfg(tmp_path)
+    cfg.backfill_max_age_minutes = 30
+    acct = BackfillAccount(sales=[old, recent], histories={"chat-1": []})
+    p = _plugin(cfg, BackfillCardinal(acct))
+    stats = p.run_backfill()
+
+    assert stats["skipped_old"] == 1
+    assert p.repo.get_order_by_funpay_id("OLD1") is None       # too old -> skipped
+    assert p.repo.get_order_by_funpay_id("NEW1") is not None   # recent -> registered
+    p.stop()
+
+
+def test_backfill_age_filter_failopen_on_unknown_date(tmp_path):
+    # No date attribute -> age unknown -> must NOT be skipped.
+    cfg = _cfg(tmp_path)
+    cfg.backfill_max_age_minutes = 30
+    acct = BackfillAccount(sales=[_paid_sale("NODATE1")], histories={"chat-1": []})
+    p = _plugin(cfg, BackfillCardinal(acct))
+    stats = p.run_backfill()
+
+    assert stats["skipped_old"] == 0
+    assert p.repo.get_order_by_funpay_id("NODATE1") is not None
+    p.stop()
+
+
 def test_backfill_background_runs_off_thread(tmp_path):
     import time
 

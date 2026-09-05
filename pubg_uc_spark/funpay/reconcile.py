@@ -34,6 +34,7 @@ so running backfill repeatedly (e.g. on every restart) is safe and idempotent.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 from typing import List, Optional, Tuple
 
@@ -64,6 +65,31 @@ def _status_text(shortcut) -> str:
     if status is None:
         return ""
     return str(getattr(status, "value", status)).lower()
+
+
+def sale_age_minutes(shortcut) -> Optional[float]:
+    """Age of a sale in minutes, or None if its date can't be determined.
+
+    Tolerant of the datetime attribute name and of naive vs aware datetimes.
+    Returns None (unknown) rather than guessing when there is no usable date.
+    """
+    for attr in ("date", "order_date", "created_at", "created"):
+        v = getattr(shortcut, attr, None)
+        if v is None:
+            continue
+        dt = None
+        if isinstance(v, _dt.datetime):
+            dt = v
+        elif isinstance(v, str):
+            try:
+                dt = _dt.datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if dt is None:
+            continue
+        now = _dt.datetime.now(dt.tzinfo) if dt.tzinfo else _dt.datetime.now()
+        return (now - dt).total_seconds() / 60.0
+    return None
 
 
 def order_is_open(shortcut) -> bool:
@@ -105,6 +131,7 @@ class Reconciler:
             "registered": 0,
             "uid_recovered": 0,
             "already_known": 0,
+            "skipped_old": 0,
         }
         if not force and not self._should_run_on_start(stats):
             return stats
@@ -119,6 +146,9 @@ class Reconciler:
             stats["scanned"] += 1
             fid = str(getattr(shortcut, "id", "") or "")
             if not fid or not order_is_open(shortcut):
+                continue
+            if self._too_old(shortcut):
+                stats["skipped_old"] += 1
                 continue
             lot = funpay_orders.match_lot(self.cfg, shortcut)
             if lot is None:
@@ -135,10 +165,22 @@ class Reconciler:
             self._notify_admin(stats)
         else:
             log.info(
-                "[Backfill] Nothing to recover (%s scanned, %s tracked lots)",
-                stats["scanned"], stats["tracked"],
+                "[Backfill] Nothing to recover (%s scanned, %s tracked, %s skipped as old)",
+                stats["scanned"], stats["tracked"], stats["skipped_old"],
             )
         return stats
+
+    def _too_old(self, shortcut) -> bool:
+        """True only if we can confidently say the sale is older than the
+        configured window. Unknown date or a clock/timezone skew (negative age)
+        -> keep the sale (fail-open), never wrongly skip a recent order."""
+        max_age = int(getattr(self.cfg, "backfill_max_age_minutes", 0) or 0)
+        if max_age <= 0:
+            return False
+        age = sale_age_minutes(shortcut)
+        if age is None or age < 0:
+            return False
+        return age > max_age
 
     def _process_sale(self, shortcut, fid: str, lot, stats: dict) -> None:
         existing = self.repo.get_order_by_funpay_id(fid)

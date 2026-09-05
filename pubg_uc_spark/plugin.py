@@ -323,12 +323,13 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 message,
                 "Готово. Просмотрено продаж: {scanned}, отслеживаемых лотов: {tracked}, "
                 "новых зарегистрировано: {registered}, из них UID найден: {uid_recovered}, "
-                "уже было в базе: {already_known}.".format(
+                "уже было в базе: {already_known}, пропущено как старые: {skipped_old}.".format(
                     scanned=s.get("scanned", 0),
                     tracked=s.get("tracked", 0),
                     registered=s.get("registered", 0),
                     uid_recovered=s.get("uid_recovered", 0),
                     already_known=s.get("already_known", 0),
+                    skipped_old=s.get("skipped_old", 0),
                 ),
             )
 
