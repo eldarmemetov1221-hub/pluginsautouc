@@ -315,6 +315,26 @@ class Config:
     retry_delay: float = field(default_factory=lambda: _get_float("RETRY_DELAY", 5.0))
     retry_backoff: float = field(default_factory=lambda: _get_float("RETRY_BACKOFF", 2.0))
 
+    # Startup reconciliation / backfill (section 19-20).
+    # FunPayCardinal does NOT replay orders that arrived while it was offline
+    # (on restart it treats existing sales as a baseline and only fires
+    # NEW_ORDER for sales placed afterwards). So an order paid during a network
+    # outage is never seen and its buyer's UID is ignored. When enabled, on
+    # startup (and via /uc_backfill) the plugin pulls the seller's currently
+    # open sales, registers any tracked ones missing from our DB, and - if
+    # BACKFILL_READ_HISTORY - reads each chat's history to pick up a UID the
+    # buyer already sent, so the order self-heals without a new message.
+    backfill_on_start: bool = field(default_factory=lambda: _get_bool("BACKFILL_ON_START", True))
+    backfill_read_history: bool = field(
+        default_factory=lambda: _get_bool("BACKFILL_READ_HISTORY", True)
+    )
+    # How many sales pages to scan (each page ~100 sales). Bounds API load.
+    backfill_max_pages: int = field(default_factory=lambda: max(1, _get_int("BACKFILL_MAX_PAGES", 3)))
+    # How many of the most recent chat messages to scan per order for a UID.
+    backfill_history_limit: int = field(
+        default_factory=lambda: max(1, _get_int("BACKFILL_HISTORY_LIMIT", 50))
+    )
+
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the
     # rule can change without touching business logic. (Env: UID_PATTERN, with

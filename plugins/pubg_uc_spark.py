@@ -39,6 +39,12 @@ def _init(cardinal, *args):
     _impl.init(cardinal)
 
 
+def _post_init(cardinal, *args):
+    # Runs after the FunPay account is logged in: recover any orders missed
+    # while Cardinal was offline (see pubg_uc_spark/funpay/reconcile.py).
+    _impl.post_init(cardinal)
+
+
 def _new_order(cardinal, event, *args):
     _impl.on_new_order(cardinal, event)
 
@@ -49,6 +55,7 @@ def _new_message(cardinal, event, *args):
 
 # --- Event bindings -------------------------------------------------------- #
 BIND_TO_PRE_INIT = [_init]
+BIND_TO_POST_INIT = [_post_init]
 BIND_TO_NEW_ORDER = [_new_order]
 BIND_TO_NEW_MESSAGE = [_new_message]
 BIND_TO_DELETE = None

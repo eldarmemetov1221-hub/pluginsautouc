@@ -16,6 +16,7 @@ from .database.repository import Repository
 from .errors import SparkCriticalError
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
+from .funpay.reconcile import Reconciler
 from .services.admin_service import AdminService
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
@@ -41,6 +42,7 @@ class Plugin:
         )
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
         self.admin = AdminService(self.cfg, self.repo, self.orders)
+        self.reconciler = Reconciler(cardinal, self.cfg, self.repo, self.orders)
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
@@ -68,6 +70,20 @@ class Plugin:
             list(self.cfg.lots.keys()),
             resumed,
         )
+
+    def run_backfill(self) -> dict:
+        """Recover orders missed while Cardinal was offline. Runs after the
+        account is logged in (post_init) and on demand via /uc_backfill.
+
+        FunPayCardinal does not replay orders that arrived during downtime, so
+        without this a restart (manual or by a watchdog) leaves those orders
+        unfulfilled. Best-effort: never lets a FunPay error break startup.
+        """
+        try:
+            return self.reconciler.run()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Backfill failed")
+            return {"error": True}
 
     def stop(self) -> None:
         self.retry.stop()
@@ -130,6 +146,16 @@ def init(cardinal, *args) -> Plugin:
         _plugin.start()
         _register_admin_commands(cardinal, _plugin)
     return _plugin
+
+
+def post_init(cardinal, *args) -> None:
+    """Run once after FPC finishes account login (BIND_TO_POST_INIT), before the
+    event runner starts - so backfill completes with no concurrency with live
+    events. The account is logged in here (unlike PRE_INIT), so get_sales works.
+    """
+    if _plugin is None:
+        init(cardinal)
+    _plugin.run_backfill()
 
 
 def on_new_order(cardinal, event, *args) -> None:
@@ -243,6 +269,28 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 return
             a = _args(message)
             reply(message, admin.skip(a[0]) if a else "Usage: /uc_skip <funpay_order_id>")
+
+        @bot.message_handler(commands=["uc_backfill"])
+        def _backfill(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            reply(message, "♻️ Запускаю восстановление пропущенных заказов...")
+            s = plugin.run_backfill()
+            if s.get("enabled") is False:
+                reply(message, "Backfill выключен (BACKFILL_ON_START=0).")
+                return
+            reply(
+                message,
+                "Готово. Просмотрено продаж: {scanned}, отслеживаемых лотов: {tracked}, "
+                "новых зарегистрировано: {registered}, из них UID найден: {uid_recovered}, "
+                "уже было в базе: {already_known}.".format(
+                    scanned=s.get("scanned", 0),
+                    tracked=s.get("tracked", 0),
+                    registered=s.get("registered", 0),
+                    uid_recovered=s.get("uid_recovered", 0),
+                    already_known=s.get("already_known", 0),
+                ),
+            )
 
         log.info("Admin commands registered")
     except Exception:
