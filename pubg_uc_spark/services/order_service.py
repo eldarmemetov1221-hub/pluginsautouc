@@ -63,6 +63,7 @@ class OrderService:
             total_uc = ""
         return template.format(
             order_id=order.funpay_order_id,
+            order=order.funpay_order_id,  # alias for the FunPay order URL
             product=self._product(order),
             uid=uid,
             player_name=player_name,
