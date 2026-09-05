@@ -20,6 +20,7 @@ from .funpay.reconcile import Reconciler
 from .services.admin_service import AdminService
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
+from .services.watchdog_control import WatchdogControl
 from .spark.client import SparkChecker
 from .utils.heartbeat import Heartbeat
 from .utils.logger import get_logger
@@ -42,9 +43,12 @@ class Plugin:
             self.cfg, self._perform_check, self._on_result, async_mode=async_mode
         )
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
-        self.admin = AdminService(self.cfg, self.repo, self.orders)
         self.reconciler = Reconciler(cardinal, self.cfg, self.repo, self.orders)
         self.heartbeat = Heartbeat(self.cfg.heartbeat_file)
+        self.watchdog = WatchdogControl(self.cfg)
+        self.admin = AdminService(
+            self.cfg, self.repo, self.orders, watchdog=self.watchdog, heartbeat=self.heartbeat
+        )
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
@@ -66,6 +70,7 @@ class Plugin:
     def start(self) -> None:
         self.retry.start()
         self.heartbeat.beat(force=True)
+        self.watchdog.ensure_file()
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, lots=%s, resumed=%s)",
@@ -278,6 +283,12 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 return
             a = _args(message)
             reply(message, admin.skip(a[0]) if a else "Usage: /uc_skip <funpay_order_id>")
+
+        @bot.message_handler(commands=["uc_watchdog"])
+        def _watchdog(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            reply(message, admin.watchdog_cmd(*_args(message)))
 
         @bot.message_handler(commands=["uc_backfill"])
         def _backfill(message):  # pragma: no cover - requires telebot

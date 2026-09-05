@@ -29,13 +29,27 @@ PROC_PATTERN="pyvenv311/bin/python.*main.py"   # identifies the Cardinal process
 PLUGIN_DIR="${FPC_DIR}/plugins/pubg_uc_spark"
 HEARTBEAT_FILE="${PLUGIN_DIR}/.heartbeat"       # must match HEARTBEAT_FILE
 TRIGGER_FILE="${PLUGIN_DIR}/.backfill_request"  # must match BACKFILL_TRIGGER_FILE
+CONTROL_FILE="${PLUGIN_DIR}/.watchdog"          # must match WATCHDOG_CONTROL_FILE
 # Restart if the runner produced no events for this long (process alive). For a
 # busy shop 15-20 min of silence means a stalled runner; raise it if quiet
-# periods cause needless restarts, lower it to react faster.
+# periods cause needless restarts, lower it to react faster. Overridden live by
+# the /uc_watchdog Telegram command via CONTROL_FILE.
 STALL_MINUTES=15
 # ---------------------------------------------------------------------------
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# Runtime control from /uc_watchdog (enable/disable + stall threshold).
+if [ -f "${CONTROL_FILE}" ]; then
+    wd_enabled=$(grep -E '^WATCHDOG_ENABLED=' "${CONTROL_FILE}" 2>/dev/null | tail -1 | cut -d= -f2 | tr -dc '0-9')
+    wd_stall=$(grep -E '^STALL_MINUTES=' "${CONTROL_FILE}" 2>/dev/null | tail -1 | cut -d= -f2 | tr -dc '0-9')
+    if [ "${wd_enabled:-1}" = "0" ]; then
+        exit 0   # watchdog disabled by admin
+    fi
+    if [ -n "${wd_stall}" ] && [ "${wd_stall}" -gt 0 ]; then
+        STALL_MINUTES="${wd_stall}"
+    fi
+fi
 
 restart_needed=false
 reason=""

@@ -369,6 +369,20 @@ class Config:
             os.path.join(os.path.dirname(os.path.abspath(__file__)), ".heartbeat"),
         )
     )
+
+    # Watchdog control file (managed by /uc_watchdog, read by tools/watchdog.sh)
+    # and the default silence threshold. Lets the admin enable/disable the
+    # watchdog and tune the stall window at runtime, so quiet periods with no
+    # customers don't trigger needless restarts.
+    watchdog_control_file: str = field(
+        default_factory=lambda: _get(
+            "WATCHDOG_CONTROL_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".watchdog"),
+        )
+    )
+    watchdog_stall_minutes: int = field(
+        default_factory=lambda: max(1, _get_int("WATCHDOG_STALL_MINUTES", 15))
+    )
     # How many sales pages to scan (each page ~100 sales). Bounds API load.
     backfill_max_pages: int = field(default_factory=lambda: max(1, _get_int("BACKFILL_MAX_PAGES", 3)))
     # How many of the most recent chat messages to scan per order for a UID.

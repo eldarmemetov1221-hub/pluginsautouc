@@ -1,0 +1,3 @@
+# Managed by /uc_watchdog - read by tools/watchdog.sh
+WATCHDOG_ENABLED=1
+STALL_MINUTES=15
