@@ -74,6 +74,8 @@ def _cfg(tmp_path):
     c.backfill_mode = "always"
     c.backfill_trigger_file = str(tmp_path / ".backfill_request")
     c.backfill_read_history = True
+    c.heartbeat_file = str(tmp_path / ".heartbeat")
+    c.watchdog_control_file = str(tmp_path / ".watchdog")
     return c
 
 

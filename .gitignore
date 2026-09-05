@@ -8,3 +8,8 @@ storage/
 .pytest_cache/
 .venv/
 venv/
+
+# Plugin runtime state (written next to the package by default) - never version.
+.heartbeat
+.watchdog
+.backfill_request

@@ -55,6 +55,12 @@ def cfg(tmp_path):
     c.code_pattern = r"[0-9]{9,11}"
     c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", "60")}
     c.admin_ids = [111]
+    # Keep all runtime state files inside the test's tmp dir (never touch the
+    # package directory, which is the production default).
+    c.backfill_mode = "off"
+    c.backfill_trigger_file = str(tmp_path / ".backfill_request")
+    c.heartbeat_file = str(tmp_path / ".heartbeat")
+    c.watchdog_control_file = str(tmp_path / ".watchdog")
     return c
 
 

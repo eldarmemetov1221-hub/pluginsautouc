@@ -51,6 +51,7 @@ def _plugin(tmp_path):
     c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", "60")}
     c.backfill_mode = "off"
     c.heartbeat_file = str(tmp_path / ".heartbeat")
+    c.watchdog_control_file = str(tmp_path / ".watchdog")
 
     from conftest import FakeCardinal
     p = Plugin(FakeCardinal(), c, async_mode=False)
