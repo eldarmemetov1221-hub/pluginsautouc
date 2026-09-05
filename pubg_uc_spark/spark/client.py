@@ -190,10 +190,19 @@ class SparkChecker:
                 "player_id": player_id,
                 "success": True,
                 "message": "redeemed successfully",
-                "player_name": "MockPlayer",
+                "charac_name": "MockPlayer",
             }
 
-        job = {"status": "done", "result": {"results": [row]}}
+        n = sum(int(v) for v in picks.values()) or 1
+        if head == "8" and n > 1:
+            # partial: first pack ok, the rest out of stock
+            ok_row = {"player_id": player_id, "success": True, "charac_name": "MockPlayer"}
+            fail_row = {"success": False, "err_code": "OUT_OF_STOCK"}
+            rows = [ok_row] + [fail_row] * (n - 1)
+        else:
+            rows = [row] * n
+
+        job = {"status": "done", "result": {"results": rows}}
         result = parser.parse_job(job, http_status=200)
         if result.status is UnifiedStatus.UNKNOWN:
             raise SparkCriticalError("Unrecognised (mock) Spark response")

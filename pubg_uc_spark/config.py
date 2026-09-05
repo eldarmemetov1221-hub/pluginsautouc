@@ -184,6 +184,14 @@ class Messages:
             "уведомлён, ожидайте, пожалуйста.",
         )
     )
+    # Multi-pack order where only part was delivered.
+    partial: str = field(
+        default_factory=lambda: _get(
+            "MSG_PARTIAL",
+            "Заказ #{order_id}: начислено {delivered} из {total} × {denomination} UC. "
+            "По остатку продавец свяжется с вами.",
+        )
+    )
     temporary_error: str = field(
         default_factory=lambda: _get(
             "MSG_TEMPORARY_ERROR",

@@ -236,14 +236,48 @@ def _first_row(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_job(job: Dict[str, Any], http_status: int | None = None) -> SparkResult:
-    """Parse a finished Spark job document into a :class:`SparkResult`."""
+    """Parse a finished Spark job document into a :class:`SparkResult`.
+
+    Handles multi-quantity orders: stock-redeem returns one row per pack in
+    ``result.results[]``. The outcome is aggregated:
+      * every row succeeded            -> VALID
+      * none succeeded                 -> the (shared) negative reason
+      * some succeeded, some did not   -> PARTIAL (delivered/total set)
+    """
     if not isinstance(job, dict):
         return SparkResult(UnifiedStatus.UNKNOWN, raw={"_raw": job}, http_status=http_status)
+
+    result_obj = job.get("result")
+    rows = result_obj.get("results") if isinstance(result_obj, dict) else None
+
+    if isinstance(rows, list) and rows:
+        parsed = [parse(r, http_status=http_status) for r in rows]
+        total = len(parsed)
+        ok = sum(1 for p in parsed if p.status is UnifiedStatus.VALID)
+        name = next((p.player_name for p in parsed if p.player_name), "") or \
+            extract_player_name(job) or extract_player_name(result_obj)
+
+        if ok == total:
+            status = UnifiedStatus.VALID
+        elif ok == 0:
+            # All failed - surface the first non-VALID reason (same UID => same
+            # reason in practice, e.g. account not found).
+            status = next((p.status for p in parsed if p.status is not UnifiedStatus.VALID),
+                          UnifiedStatus.UNKNOWN)
+        else:
+            status = UnifiedStatus.PARTIAL
+
+        msg = next((p.message for p in parsed if p.message), "")
+        return SparkResult(status=status, raw=job, message=msg, http_status=http_status,
+                           player_name=name, delivered=ok, total=total)
+
+    # No results[] wrapper (e.g. a synchronous detail.error body) - single parse.
     row = _first_row(job)
     result = parse(row, http_status=http_status)
-    # The player name may live at the job/result level rather than in the row.
     if not result.player_name:
         result.player_name = extract_player_name(job) or extract_player_name(
-            job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+            result_obj if isinstance(result_obj, dict) else {}
         )
+    result.total = 1
+    result.delivered = 1 if result.status is UnifiedStatus.VALID else 0
     return result

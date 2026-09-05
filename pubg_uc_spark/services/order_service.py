@@ -46,15 +46,31 @@ class OrderService:
     # Message formatting helpers
     # ------------------------------------------------------------------ #
     def _product(self, order: OrderRecord) -> str:
+        """Buyer-facing product label, quantity-aware (e.g. '60 UC ×3')."""
         lot = self.cfg.lot(order.lot_id)
-        return lot.product if lot else ""
+        base = lot.product if lot else ""
+        qty = order.quantity or 1
+        return f"{base} ×{qty}" if qty > 1 else base
 
-    def _fmt(self, order: OrderRecord, template: str, uid: str = "", player_name: str = "") -> str:
+    def _fmt(self, order: OrderRecord, template: str, uid: str = "", player_name: str = "",
+             delivered=None, total=None) -> str:
+        lot = self.cfg.lot(order.lot_id)
+        denomination = lot.denomination if lot else ""
+        qty = order.quantity or 1
+        try:
+            total_uc = int(str(denomination)) * qty
+        except (TypeError, ValueError):
+            total_uc = ""
         return template.format(
             order_id=order.funpay_order_id,
             product=self._product(order),
             uid=uid,
             player_name=player_name,
+            quantity=qty,
+            denomination=denomination,
+            total_uc=total_uc,
+            delivered=(delivered if delivered is not None else qty),
+            total=(total if total is not None else qty),
         )
 
     # ------------------------------------------------------------------ #
@@ -184,6 +200,33 @@ class OrderService:
                 )
                 self.messenger.send_once(f"result:{code_id}", order.chat_id, text)
             self.repo.add_log("buyer_notified", msg_attr, order_id=code.order_id, code_id=code_id)
+            return
+
+        # --- Multi-pack order partially delivered ---
+        if result is not None and result.status is UnifiedStatus.PARTIAL:
+            self.repo.update_code(
+                code_id,
+                status=CodeStatus.FAILED,
+                spark_status=result.status.value,
+                error_message=f"partial {result.delivered}/{result.total}",
+                checked=True,
+            )
+            if order:
+                self.repo.set_order_status(order.id, OrderStatus.ERROR)
+            log.warning("[Order #%s] Partial delivery %s/%s", oid, result.delivered, result.total)
+            self.repo.add_log(
+                "partial", f"{result.delivered}/{result.total}", level="WARNING",
+                order_id=code.order_id, code_id=code_id,
+            )
+            if order and order.chat_id:
+                self.messenger.send_once(
+                    f"result:{code_id}", order.chat_id,
+                    self._fmt(order, self.cfg.messages.partial, uid,
+                              delivered=result.delivered, total=result.total),
+                )
+            self._notify_admin(
+                f"🛑 Order #{oid}: partial delivery {result.delivered}/{result.total} (uid={uid})"
+            )
             return
 
         # --- Operational error we understand (e.g. out of stock) ---

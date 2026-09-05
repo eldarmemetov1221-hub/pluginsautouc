@@ -197,6 +197,23 @@ def test_two_orders_concurrent(plugin, cardinal):
     assert _order_status(plugin, "2002") == OrderStatus.INVALID.value
 
 
+# 16. Multi-quantity order (3 packs) -> picks {60:3}, all delivered -> VALID.
+def test_multi_quantity_all_delivered(plugin, cardinal):
+    plugin.on_new_order(make_order(cardinal, "5001", amount=3))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "mq1")
+    assert _order_status(plugin, "5001") == OrderStatus.VALID.value
+    # success message reflects the quantity
+    assert any("×3" in t for t in cardinal.texts_to("chat-1"))
+
+
+# 17. Multi-quantity partial delivery -> PARTIAL -> ERROR + seller notified.
+def test_multi_quantity_partial(plugin, cardinal):
+    plugin.on_new_order(make_order(cardinal, "5002", amount=3))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", "800000000", "mq2")  # head 8 -> partial
+    assert _order_status(plugin, "5002") == OrderStatus.ERROR.value
+    assert any("начислено 1 из 3" in t for t in cardinal.texts_to("chat-1"))
+
+
 # 15. One buyer with multiple orders -> UID applies to the oldest active order.
 def test_one_buyer_multiple_orders(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "3001", buyer_id="C", chat_id="cC"))

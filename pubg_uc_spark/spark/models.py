@@ -18,6 +18,7 @@ class UnifiedStatus(str, Enum):
     INVALID = "INVALID"
     ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
     ALREADY_USED = "ALREADY_USED"
+    PARTIAL = "PARTIAL"    # multi-pack order: some delivered, some not
     ERROR = "ERROR"        # definitive error we understand but can't act on
     UNKNOWN = "UNKNOWN"    # unrecognised response -> treat as critical
 
@@ -31,6 +32,8 @@ class SparkResult:
     message: str = ""
     http_status: Optional[int] = None
     player_name: str = ""  # resolved character/nick name, when Spark returns it
+    delivered: int = 0     # packs successfully redeemed (multi-quantity orders)
+    total: int = 0         # packs requested
 
     @property
     def is_success(self) -> bool:
