@@ -16,16 +16,39 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 # Optional .env loading. Never required at import time.
-try:  # pragma: no cover - trivial
+def _load_env_file(path: str) -> None:
+    """Minimal .env loader (KEY=VALUE lines). No external dependency.
+
+    Does NOT override variables already present in the environment. Values may
+    be optionally wrapped in single/double quotes. Lines starting with '#' and
+    lines without '=' are ignored.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        pass
+
+
+# 1) Load the plugin-local .env (next to this package) so it works regardless of
+#    FunPayCardinal's working directory - using our own parser, so python-dotenv
+#    is NOT required. 2) If python-dotenv happens to be installed, also load a
+#    .env from the CWD upward (without overriding what we already set).
+_load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+try:  # pragma: no cover - optional
     from dotenv import load_dotenv
 
-    # 1) Load the plugin-local .env (next to this package) so it works no matter
-    #    what working directory FunPayCardinal runs from. 2) Then a .env from the
-    #    CWD upward, without overriding what the plugin-local file already set.
-    _pkg_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.isfile(_pkg_env):
-        load_dotenv(_pkg_env)
-    load_dotenv()
+    load_dotenv(override=False)
 except Exception:  # pragma: no cover
     pass
 
