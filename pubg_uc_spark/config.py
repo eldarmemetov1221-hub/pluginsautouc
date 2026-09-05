@@ -358,6 +358,17 @@ class Config:
     backfill_read_history: bool = field(
         default_factory=lambda: _get_bool("BACKFILL_READ_HISTORY", True)
     )
+
+    # Liveness heartbeat file. The plugin bumps it at startup and on every
+    # FunPay runner event, so a watchdog can tell a stalled runner (process
+    # alive but no events - e.g. poll thread stuck after a network flap) from a
+    # healthy one. Empty disables writing. Default: next to this .env.
+    heartbeat_file: str = field(
+        default_factory=lambda: _get(
+            "HEARTBEAT_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".heartbeat"),
+        )
+    )
     # How many sales pages to scan (each page ~100 sales). Bounds API load.
     backfill_max_pages: int = field(default_factory=lambda: max(1, _get_int("BACKFILL_MAX_PAGES", 3)))
     # How many of the most recent chat messages to scan per order for a UID.

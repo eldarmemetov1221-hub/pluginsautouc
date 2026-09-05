@@ -21,6 +21,7 @@ from .services.admin_service import AdminService
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
 from .spark.client import SparkChecker
+from .utils.heartbeat import Heartbeat
 from .utils.logger import get_logger
 
 log = get_logger("plugin")
@@ -43,6 +44,7 @@ class Plugin:
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
         self.admin = AdminService(self.cfg, self.repo, self.orders)
         self.reconciler = Reconciler(cardinal, self.cfg, self.repo, self.orders)
+        self.heartbeat = Heartbeat(self.cfg.heartbeat_file)
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
@@ -63,6 +65,7 @@ class Plugin:
     # ------------------------------------------------------------------ #
     def start(self) -> None:
         self.retry.start()
+        self.heartbeat.beat(force=True)
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, lots=%s, resumed=%s)",
@@ -95,6 +98,8 @@ class Plugin:
     # Event handlers
     # ------------------------------------------------------------------ #
     def on_new_order(self, order_shortcut) -> None:
+        # Any event proves the FunPay runner is alive and polling.
+        self.heartbeat.beat()
         funpay_order_id = str(getattr(order_shortcut, "id", "") or "")
         if not funpay_order_id:
             return
@@ -117,6 +122,8 @@ class Plugin:
         self.orders.handle_new_order(record)
 
     def on_new_message(self, message) -> None:
+        # Any event proves the FunPay runner is alive and polling.
+        self.heartbeat.beat()
         message_id = str(getattr(message, "id", "") or "")
         author_id = str(getattr(message, "author_id", "") or "")
         chat_id = str(getattr(message, "chat_id", "") or "")
