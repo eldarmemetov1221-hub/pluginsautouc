@@ -71,16 +71,18 @@ class Plugin:
             resumed,
         )
 
-    def run_backfill(self) -> dict:
+    def run_backfill(self, force: bool = False) -> dict:
         """Recover orders missed while Cardinal was offline. Runs after the
         account is logged in (post_init) and on demand via /uc_backfill.
 
         FunPayCardinal does not replay orders that arrived during downtime, so
         without this a restart (manual or by a watchdog) leaves those orders
-        unfulfilled. Best-effort: never lets a FunPay error break startup.
+        unfulfilled. ``force=True`` (the admin command) bypasses BACKFILL_MODE
+        and the watchdog trigger. Best-effort: never lets a FunPay error break
+        startup.
         """
         try:
-            return self.reconciler.run()
+            return self.reconciler.run(force=force)
         except Exception:  # pragma: no cover - defensive
             log.exception("Backfill failed")
             return {"error": True}
@@ -275,10 +277,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             if not guard(message):
                 return
             reply(message, "♻️ Запускаю восстановление пропущенных заказов...")
-            s = plugin.run_backfill()
-            if s.get("enabled") is False:
-                reply(message, "Backfill выключен (BACKFILL_ON_START=0).")
-                return
+            s = plugin.run_backfill(force=True)
             reply(
                 message,
                 "Готово. Просмотрено продаж: {scanned}, отслеживаемых лотов: {tracked}, "

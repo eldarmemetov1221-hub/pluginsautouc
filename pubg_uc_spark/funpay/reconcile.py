@@ -34,6 +34,7 @@ so running backfill repeatedly (e.g. on every restart) is safe and idempotent.
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Tuple
 
 from ..config import Config
@@ -88,7 +89,16 @@ class Reconciler:
         self.orders = orders_service
 
     # ------------------------------------------------------------------ #
-    def run(self) -> dict:
+    def run(self, force: bool = False) -> dict:
+        """Run reconciliation.
+
+        ``force=True`` (the /uc_backfill command) bypasses BACKFILL_MODE and any
+        watchdog trigger - an explicit admin request always scans. Automatic
+        startup runs (``force=False``) obey BACKFILL_MODE:
+          off      -> skip;
+          watchdog -> run only if the trigger file is present (then consume it);
+          always   -> run.
+        """
         stats = {
             "scanned": 0,
             "tracked": 0,
@@ -96,9 +106,7 @@ class Reconciler:
             "uid_recovered": 0,
             "already_known": 0,
         }
-        if not self.cfg.backfill_on_start:
-            log.info("[Backfill] Disabled (BACKFILL_ON_START=0)")
-            stats["enabled"] = False
+        if not force and not self._should_run_on_start(stats):
             return stats
 
         try:
@@ -156,6 +164,36 @@ class Reconciler:
                 stats["scanned"], stats["tracked"],
             )
         return stats
+
+    # ------------------------------------------------------------------ #
+    # Startup gating (BACKFILL_MODE + watchdog trigger)
+    # ------------------------------------------------------------------ #
+    def _should_run_on_start(self, stats: dict) -> bool:
+        mode = (getattr(self.cfg, "backfill_mode", "always") or "always").lower()
+        if mode == "off":
+            log.info("[Backfill] Disabled on startup (BACKFILL_MODE=off)")
+            stats["enabled"] = False
+            return False
+        if mode == "watchdog":
+            if self._consume_trigger():
+                log.info("[Backfill] Watchdog trigger present -> running")
+                return True
+            log.info("[Backfill] Watchdog mode: no trigger, skipping startup scan")
+            stats["skipped"] = "no-watchdog-trigger"
+            return False
+        return True  # always
+
+    def _consume_trigger(self) -> bool:
+        """Return True if the watchdog trigger file exists, deleting it so a
+        subsequent (manual) restart does not scan again."""
+        path = getattr(self.cfg, "backfill_trigger_file", "") or ""
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            os.remove(path)
+        except OSError:  # pragma: no cover - best effort; presence is the signal
+            log.warning("[Backfill] Could not remove trigger file %s", path)
+        return True
 
     # ------------------------------------------------------------------ #
     # UID recovery from chat history

@@ -95,6 +95,20 @@ def _get_admin_ids() -> List[int]:
 #: Base UC denominations the Spark bot can redeem from stock.
 SPARK_BASE_DENOMINATIONS = ("60", "325", "660", "1800", "3850", "8100")
 
+#: Valid values for BACKFILL_MODE.
+BACKFILL_MODES = ("always", "watchdog", "off")
+
+
+def _resolve_backfill_mode() -> str:
+    """Resolve BACKFILL_MODE (always|watchdog|off), honouring the legacy
+    BACKFILL_ON_START=0 flag as ``off``."""
+    m = os.environ.get("BACKFILL_MODE", "").strip().lower()
+    if m in BACKFILL_MODES:
+        return m
+    if not _get_bool("BACKFILL_ON_START", True):
+        return "off"
+    return "always"
+
 
 @dataclass
 class LotConfig:
@@ -319,12 +333,28 @@ class Config:
     # FunPayCardinal does NOT replay orders that arrived while it was offline
     # (on restart it treats existing sales as a baseline and only fires
     # NEW_ORDER for sales placed afterwards). So an order paid during a network
-    # outage is never seen and its buyer's UID is ignored. When enabled, on
-    # startup (and via /uc_backfill) the plugin pulls the seller's currently
-    # open sales, registers any tracked ones missing from our DB, and - if
-    # BACKFILL_READ_HISTORY - reads each chat's history to pick up a UID the
-    # buyer already sent, so the order self-heals without a new message.
-    backfill_on_start: bool = field(default_factory=lambda: _get_bool("BACKFILL_ON_START", True))
+    # outage is never seen and its buyer's UID is ignored. When it runs, on
+    # startup (and always via /uc_backfill) the plugin pulls the seller's
+    # currently open sales, registers any tracked ones missing from our DB, and
+    # - if BACKFILL_READ_HISTORY - reads each chat's history to pick up a UID
+    # the buyer already sent, so the order self-heals without a new message.
+    #
+    # BACKFILL_MODE controls WHEN the automatic startup scan runs:
+    #   always   - every startup (default);
+    #   watchdog - only when a watchdog-created trigger file is present, so a
+    #              manual restart (you are present, handling things yourself)
+    #              does NOT scan, but an unattended watchdog restart does;
+    #   off      - never on startup (only /uc_backfill triggers it).
+    # (Legacy: BACKFILL_ON_START=0 is honoured as BACKFILL_MODE=off.)
+    backfill_mode: str = field(default_factory=_resolve_backfill_mode)
+    # Trigger file for watchdog mode. The watchdog must create this file right
+    # before (re)starting Cardinal; the plugin consumes (deletes) it on startup.
+    backfill_trigger_file: str = field(
+        default_factory=lambda: _get(
+            "BACKFILL_TRIGGER_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".backfill_request"),
+        )
+    )
     backfill_read_history: bool = field(
         default_factory=lambda: _get_bool("BACKFILL_READ_HISTORY", True)
     )

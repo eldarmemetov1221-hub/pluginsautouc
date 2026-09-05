@@ -71,7 +71,8 @@ def _cfg(tmp_path):
     # description "PUBG Mobile 60 UC ..." matches this lot
     c.lots = {"37330959": LotConfig("37330959", "PUBG Mobile 60 UC", "60")}
     c.admin_ids = [111]
-    c.backfill_on_start = True
+    c.backfill_mode = "always"
+    c.backfill_trigger_file = str(tmp_path / ".backfill_request")
     c.backfill_read_history = True
     return c
 
@@ -209,7 +210,7 @@ def test_backfill_takes_newest_uid_from_history(tmp_path):
 
 def test_backfill_disabled(tmp_path):
     cfg = _cfg(tmp_path)
-    cfg.backfill_on_start = False
+    cfg.backfill_mode = "off"
     acct = BackfillAccount(sales=[_paid_sale("ORD7")])
     p = _plugin(cfg, BackfillCardinal(acct))
     stats = p.run_backfill()
@@ -217,6 +218,55 @@ def test_backfill_disabled(tmp_path):
     assert stats.get("enabled") is False
     assert acct.sales_calls == 0
     assert p.repo.get_order_by_funpay_id("ORD7") is None
+    p.stop()
+
+
+def test_backfill_off_but_force_still_runs(tmp_path):
+    # /uc_backfill (force=True) bypasses BACKFILL_MODE=off.
+    cfg = _cfg(tmp_path)
+    cfg.backfill_mode = "off"
+    acct = BackfillAccount(sales=[_paid_sale("ORD7B")], histories={"chat-1": []})
+    p = _plugin(cfg, BackfillCardinal(acct))
+    stats = p.run_backfill(force=True)
+
+    assert stats["registered"] == 1
+    assert p.repo.get_order_by_funpay_id("ORD7B") is not None
+    p.stop()
+
+
+def test_watchdog_mode_skips_without_trigger(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.backfill_mode = "watchdog"   # no trigger file created
+    acct = BackfillAccount(sales=[_paid_sale("ORD_WD1")])
+    p = _plugin(cfg, BackfillCardinal(acct))
+    stats = p.run_backfill()
+
+    assert stats.get("skipped") == "no-watchdog-trigger"
+    assert acct.sales_calls == 0
+    assert p.repo.get_order_by_funpay_id("ORD_WD1") is None
+    p.stop()
+
+
+def test_watchdog_mode_runs_and_consumes_trigger(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.backfill_mode = "watchdog"
+    # Watchdog created the trigger before (re)starting Cardinal.
+    with open(cfg.backfill_trigger_file, "w") as fh:
+        fh.write("")
+    acct = BackfillAccount(sales=[_paid_sale("ORD_WD2")], histories={"chat-1": []})
+    p = _plugin(cfg, BackfillCardinal(acct))
+
+    stats = p.run_backfill()
+    assert stats["registered"] == 1
+    assert not os.path.exists(cfg.backfill_trigger_file)   # consumed
+
+    # A subsequent (manual) restart in the same mode must NOT scan again.
+    acct2 = BackfillAccount(sales=[_paid_sale("ORD_WD3")])
+    p.reconciler.cardinal = BackfillCardinal(acct2)
+    p.reconciler = type(p.reconciler)(BackfillCardinal(acct2), cfg, p.repo, p.orders)
+    stats2 = p.run_backfill()
+    assert stats2.get("skipped") == "no-watchdog-trigger"
+    assert p.repo.get_order_by_funpay_id("ORD_WD3") is None
     p.stop()
 
 
