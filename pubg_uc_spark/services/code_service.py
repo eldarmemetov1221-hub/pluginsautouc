@@ -16,7 +16,7 @@ from typing import Optional
 # A standalone run of digits that looks like a UID attempt but may be the wrong
 # length. Used to tell "malformed UID" apart from ordinary chatter so we can
 # reply with the bad_format hint instead of ignoring the message.
-_UID_ATTEMPT = re.compile(r"(?<!\w)\d{4,15}(?!\w)")
+_UID_ATTEMPT = re.compile(r"(?<![0-9])\d{4,15}(?![0-9])")
 
 from ..database.models import (
     CODE_FINAL_NEGATIVE,

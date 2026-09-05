@@ -25,7 +25,11 @@ def extract_codes(text: str, pattern: str) -> List[str]:
     """
     if not text:
         return []
-    rx = re.compile(rf"(?<!\w)(?:{pattern})(?!\w)")
+    # Digit boundaries (not \w): a UID is a run of digits, so this extracts it
+    # even when letters are stuck to it ("52426168718айди", "id52426168718"),
+    # while still refusing to pick a 9-11 slice out of a longer digit run
+    # (e.g. a 12+ digit number yields no match).
+    rx = re.compile(rf"(?<![0-9])(?:{pattern})(?![0-9])")
     seen: set[str] = set()
     out: List[str] = []
     for m in rx.finditer(text):

@@ -24,6 +24,10 @@ def test_extract_uid_from_message():
     assert extract_first_code("нет id тут", PATTERN) is None
     # A 12-digit run is NOT a valid UID and must not be partially matched.
     assert extract_first_code("123456789012", PATTERN) is None
+    # Letters glued to the digits must NOT prevent extraction.
+    assert extract_first_code("52426168718айди", PATTERN) == "52426168718"
+    assert extract_first_code("id52426168718", PATTERN) == "52426168718"
+    assert extract_first_code("айди52426168718айди", PATTERN) == "52426168718"
 
 
 def test_is_valid_format():
