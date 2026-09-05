@@ -13,10 +13,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-# A standalone run of digits that looks like a UID attempt but may be the wrong
-# length. Used to tell "malformed UID" apart from ordinary chatter so we can
-# reply with the bad_format hint instead of ignoring the message.
-_UID_ATTEMPT = re.compile(r"(?<![0-9])\d{4,15}(?![0-9])")
+# A standalone run of >=6 digits that looks like a UID attempt but is the wrong
+# length (too short 6-8, or too long 12+). Used to tell "malformed UID" apart
+# from ordinary chatter so we reply with the bad_format hint instead of ignoring
+# the message. Min 6 avoids reacting to small casual numbers (years, counts).
+_UID_ATTEMPT = re.compile(r"(?<![0-9])\d{6,}(?![0-9])")
 
 from ..database.models import (
     CODE_FINAL_NEGATIVE,
