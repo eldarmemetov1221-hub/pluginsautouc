@@ -53,9 +53,9 @@ class Plugin:
             raise SparkCriticalError(f"code_id {code_id} vanished")
         order = self.repo.get_order(code.order_id) if code.order_id else None
         lot = self.cfg.lot(order.lot_id) if order else None
-        denomination = lot.denomination if lot else "60"
-        quantity = max(1, order.quantity if order else 1)
-        picks = {denomination: quantity}
+        quantity = order.quantity if order else 1
+        # Spark picks are the lot's base combination multiplied by the quantity.
+        picks = lot.picks_for(quantity) if lot else {"60": max(1, quantity)}
         return self.checker.redeem(code.code, picks)
 
     # ------------------------------------------------------------------ #

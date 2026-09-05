@@ -30,9 +30,9 @@ def _matches(lot: LotConfig, description: str) -> bool:
         return False
     if lot.keywords:
         return all(str(k).lower() in desc for k in lot.keywords)
-    # Default: the denomination as a WHOLE number (so "60" != "660") + "uc".
-    denom = str(lot.denomination)
-    if denom and not re.search(rf"(?<!\d){re.escape(denom)}(?!\d)", desc):
+    # Default: the advertised UC as a WHOLE number (so "60" != "660") + "uc".
+    uc = str(lot.uc)
+    if uc and not re.search(rf"(?<!\d){re.escape(uc)}(?!\d)", desc):
         return False
     return "uc" in desc
 

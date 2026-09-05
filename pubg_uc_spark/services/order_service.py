@@ -55,10 +55,10 @@ class OrderService:
     def _fmt(self, order: OrderRecord, template: str, uid: str = "", player_name: str = "",
              delivered=None, total=None) -> str:
         lot = self.cfg.lot(order.lot_id)
-        denomination = lot.denomination if lot else ""
+        uc = lot.uc if lot else ""
         qty = order.quantity or 1
         try:
-            total_uc = int(str(denomination)) * qty
+            total_uc = int(str(uc)) * qty
         except (TypeError, ValueError):
             total_uc = ""
         return template.format(
@@ -67,7 +67,8 @@ class OrderService:
             uid=uid,
             player_name=player_name,
             quantity=qty,
-            denomination=denomination,
+            uc=uc,
+            denomination=uc,  # backward-compat alias
             total_uc=total_uc,
             delivered=(delivered if delivered is not None else qty),
             total=(total if total is not None else qty),

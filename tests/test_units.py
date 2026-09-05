@@ -64,6 +64,20 @@ def test_lot_matching_by_description():
     assert fo.match_lot(cfg, sc("PUBG 120 UC")) is None
 
 
+def test_lot_picks_combinations():
+    from pubg_uc_spark.config import LotConfig
+
+    # advertised 445 UC delivered as 325 + 60 + 60
+    lot = LotConfig("id445", "445 UC", uc="445", picks={"325": 1, "60": 2})
+    assert lot.base_picks() == {"325": 1, "60": 2}
+    assert lot.picks_for(1) == {"325": 1, "60": 2}
+    # ordering 2 units multiplies each pick
+    assert lot.picks_for(2) == {"325": 2, "60": 4}
+    # a lot without explicit picks falls back to {uc: 1}
+    simple = LotConfig("id60", "60 UC", uc="60")
+    assert simple.picks_for(3) == {"60": 3}
+
+
 def test_parse_job_and_boolean_validity():
     # A finished job with a per-code result row.
     valid_job = {"status": "done", "result": {"results": [{"code": "x", "valid": True}]}}

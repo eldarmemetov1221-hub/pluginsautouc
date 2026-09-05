@@ -63,32 +63,59 @@ def _get_admin_ids() -> List[int]:
     return ids
 
 
+#: Base UC denominations the Spark bot can redeem from stock.
+SPARK_BASE_DENOMINATIONS = ("60", "325", "660", "1800", "3850", "8100")
+
+
 @dataclass
 class LotConfig:
     """Metadata for a single tracked FunPay lot.
 
-    ``denomination`` is the Spark stock "pick" key (the UC pack size, e.g.
-    ``"60"``). The number of packs to redeem is the FunPay order's own quantity,
-    so the Spark ``picks`` become ``{denomination: order_quantity}``.
+    A FunPay lot advertises some UC amount (``uc``) which may be delivered as a
+    COMBINATION of Spark base packs (``picks``). Examples:
+        "60"  -> {"60": 1}
+        "120" -> {"60": 2}
+        "300" -> {"325": 1}          (buyer pays 300, gets 325)
+        "445" -> {"325": 1, "60": 2}
+        "1045"-> {"660": 1, "325": 1, "60": 1}
+    For an order of N units, each pick count is multiplied by N.
     """
 
     lot_id: str
-    product: str
-    denomination: str = "60"
-    # Keywords matched (AND, case-insensitive substrings) against the FunPay
-    # order description to recognise this lot. FunPay orders do NOT expose the
-    # offer id, so matching is by description. Empty -> match by denomination
-    # (as a whole number) + "uc".
+    product: str          # buyer-facing label, e.g. "300 UC"
+    uc: str = "60"        # advertised amount (used for description matching)
+    # Spark stock combination. If empty, defaults to {uc: 1}.
+    picks: dict = field(default_factory=dict)
+    # Keywords matched (AND, case-insensitive) against the FunPay order
+    # description to recognise this lot. FunPay orders do NOT expose the offer
+    # id, so matching is by description. Empty -> match by ``uc`` (as a whole
+    # number) + "uc".
     keywords: list = field(default_factory=list)
+
+    def base_picks(self) -> dict:
+        """The Spark picks for ONE unit of this lot."""
+        if self.picks:
+            return {str(k): int(v) for k, v in self.picks.items()}
+        return {str(self.uc): 1}
+
+    def picks_for(self, quantity: int) -> dict:
+        """Spark picks for ``quantity`` units (counts multiplied)."""
+        q = max(1, int(quantity or 1))
+        return {k: v * q for k, v in self.base_picks().items()}
 
 
 def _default_lots() -> Dict[str, LotConfig]:
     """Default single-lot config for the task's PUBG 60 UC offer.
 
-    Overridable via the ``LOTS`` env var (JSON), e.g.::
+    Overridable via the ``LOTS`` env var (JSON). Each lot gives the advertised
+    ``uc`` (for matching) and the Spark ``picks`` combination, e.g.::
 
-        LOTS={"37330959": {"product": "PUBG 60 UC", "denomination": "60"},
-              "40000000": {"product": "PUBG 120 UC", "denomination": "120"}}
+        LOTS={
+          "37330959": {"product": "60 UC",  "uc": "60",  "picks": {"60": 1}},
+          "id120":    {"product": "120 UC", "uc": "120", "picks": {"60": 2}},
+          "id300":    {"product": "300 UC", "uc": "300", "picks": {"325": 1}},
+          "id445":    {"product": "445 UC", "uc": "445", "picks": {"325": 1, "60": 2}}
+        }
     """
     raw = os.environ.get("LOTS", "").strip()
     if raw:
@@ -98,8 +125,8 @@ def _default_lots() -> Dict[str, LotConfig]:
                 str(lid): LotConfig(
                     lot_id=str(lid),
                     product=str(meta.get("product", "")),
-                    # accept "denomination" or legacy "quantity"
-                    denomination=str(meta.get("denomination", meta.get("quantity", "60"))),
+                    uc=str(meta.get("uc", meta.get("denomination", "60"))),
+                    picks={str(k): int(v) for k, v in (meta.get("picks", {}) or {}).items()},
                     keywords=list(meta.get("keywords", []) or []),
                 )
                 for lid, meta in data.items()
@@ -109,11 +136,20 @@ def _default_lots() -> Dict[str, LotConfig]:
             pass
 
     lot_id = _get("FUNPAY_LOT_ID", "37330959")
+    uc = _get("UC", _get("DENOMINATION", "60"))
+    picks: Dict[str, int] = {}
+    picks_raw = os.environ.get("PICKS", "").strip()
+    if picks_raw:
+        try:
+            picks = {str(k): int(v) for k, v in json.loads(picks_raw).items()}
+        except (ValueError, AttributeError, TypeError):
+            picks = {}
     return {
         lot_id: LotConfig(
             lot_id=lot_id,
-            product=_get("PRODUCT_NAME", "PUBG Mobile 60 UC"),
-            denomination=_get("DENOMINATION", "60"),
+            product=_get("PRODUCT_NAME", "60 UC"),
+            uc=uc,
+            picks=picks,
         )
     }
 
@@ -188,8 +224,8 @@ class Messages:
     partial: str = field(
         default_factory=lambda: _get(
             "MSG_PARTIAL",
-            "Заказ #{order_id}: начислено {delivered} из {total} × {denomination} UC. "
-            "По остатку продавец свяжется с вами.",
+            "Заказ #{order_id} ({product}): начислено частично ({delivered} из "
+            "{total} пакетов). По остатку продавец свяжется с вами.",
         )
     )
     temporary_error: str = field(

@@ -211,7 +211,7 @@ def test_multi_quantity_partial(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "5002", amount=3))
     _msg(plugin, cardinal, "buyer-1", "chat-1", "800000000", "mq2")  # head 8 -> partial
     assert _order_status(plugin, "5002") == OrderStatus.ERROR.value
-    assert any("начислено 1 из 3" in t for t in cardinal.texts_to("chat-1"))
+    assert any("1 из 3" in t and "частично" in t for t in cardinal.texts_to("chat-1"))
 
 
 # 15. One buyer with multiple orders -> UID applies to the oldest active order.
