@@ -306,6 +306,10 @@ class Config:
         default_factory=lambda: _get_bool("SPARK_MOCK", not bool(_get("SPARK_API_URL")))
     )
 
+    # Number of parallel redeem workers (higher = more throughput under bursts,
+    # but watch Spark rate limits / quota). Default 1 = fully serial.
+    spark_workers: int = field(default_factory=lambda: max(1, _get_int("SPARK_WORKERS", 1)))
+
     # Retry (section 12)
     max_retries: int = field(default_factory=lambda: _get_int("MAX_RETRIES", 3))
     retry_delay: float = field(default_factory=lambda: _get_float("RETRY_DELAY", 5.0))

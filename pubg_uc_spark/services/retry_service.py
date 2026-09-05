@@ -49,7 +49,7 @@ class RetryService:
 
         self._sleep = sleep_fn or time.sleep
         self._queue: "queue.Queue[Optional[int]]" = queue.Queue()
-        self._thread: Optional[threading.Thread] = None
+        self._threads: list[threading.Thread] = []
         self._running = False
 
     # ------------------------------------------------------------------ #
@@ -57,17 +57,22 @@ class RetryService:
         if not self.async_mode or self._running:
             return
         self._running = True
-        self._thread = threading.Thread(
-            target=self._worker, name="pubg-uc-spark-retry", daemon=True
-        )
-        self._thread.start()
-        log.info("Retry worker started")
+        n = max(1, int(getattr(self.cfg, "spark_workers", 1)))
+        self._threads = []
+        for i in range(n):
+            t = threading.Thread(
+                target=self._worker, name=f"pubg-uc-spark-retry-{i}", daemon=True
+            )
+            t.start()
+            self._threads.append(t)
+        log.info("Retry worker(s) started: %d", n)
 
     def stop(self) -> None:
         if not self._running:
             return
         self._running = False
-        self._queue.put(None)  # wake the worker so it can exit
+        for _ in self._threads:  # one sentinel per worker so each can exit
+            self._queue.put(None)
 
     def enqueue(self, code_id: int) -> None:
         if self.async_mode:
