@@ -141,6 +141,17 @@ def test_parse_stock_redeem_failure_row():
     assert parser.parse_job(job3).status is UnifiedStatus.INVALID
 
 
+def test_parse_out_of_stock_variants():
+    # Real failure message from stock-redeem when there is no stock.
+    assert parser.parse({"error": "60 UC: need 1, have 0"}).status is UnifiedStatus.ERROR
+    assert parser.parse({"message": "not enough stock"}).status is UnifiedStatus.ERROR
+    # job-level failure with the shortage in the "error" field, no results wrapper
+    job = {"status": "failed", "error": "60 UC: need 1, have 0"}
+    assert parser.parse_job(job).status is UnifiedStatus.ERROR
+    # need N, have M where M >= N is NOT a shortage
+    assert parser.parse({"error": "need 1, have 3", "success": True}).status is UnifiedStatus.VALID
+
+
 def test_fsm_transitions():
     assert can_transition(OrderStatus.NEW, OrderStatus.WAITING_FOR_CODE)
     assert can_transition(OrderStatus.CHECKING, OrderStatus.VALID)
