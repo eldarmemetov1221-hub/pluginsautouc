@@ -19,6 +19,41 @@ class AdminService:
         self.repo = repo
         self.orders = order_service
 
+    # ---- help / stats ---- #
+    def help_text(self) -> str:
+        return (
+            "🛠 Команды PUBG UC Spark:\n\n"
+            "📋 Просмотр:\n"
+            "/uc_help — этот список\n"
+            "/uc_stats — сводка по заказам (всего и за сегодня)\n"
+            "/uc_order <order_id> — статус заказа и его коды\n"
+            "/uc_code <code_id> — детали кода\n"
+            "/uc_history <order_id> — журнал событий заказа\n\n"
+            "🔧 Действия:\n"
+            "/uc_recheck <code_id> — повторить проверку/начисление\n"
+            "/uc_cancel <code_id> — отменить автоповторы (FAILED)\n"
+            "/uc_setstatus <order_id> <СТАТУС> — сменить статус заказа\n"
+            "/uc_resend <order_id> — попросить покупателя прислать UID\n"
+            "/uc_skip <order_id> — не начислять (если выдали вручную)"
+        )
+
+    def stats(self) -> str:
+        o_all = self.repo.order_status_counts()
+        o_day = self.repo.order_status_counts(today_only=True)
+        c_all = self.repo.code_status_counts()
+
+        def line(d: dict) -> str:
+            if not d:
+                return "  —"
+            return "  " + ", ".join(f"{k}={v}" for k, v in sorted(d.items()))
+
+        return (
+            "📊 Статистика PUBG UC Spark\n\n"
+            f"Заказы (всего): {sum(o_all.values())}\n{line(o_all)}\n\n"
+            f"Заказы (сегодня): {sum(o_day.values())}\n{line(o_day)}\n\n"
+            f"Коды (всего): {sum(c_all.values())}\n{line(c_all)}"
+        )
+
     # ---- read ---- #
     def order_status(self, funpay_order_id: str) -> str:
         order = self.repo.get_order_by_funpay_id(str(funpay_order_id))

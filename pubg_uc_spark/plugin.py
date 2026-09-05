@@ -172,6 +172,18 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         return parts[1:]
 
     try:
+        @bot.message_handler(commands=["uc_help"])
+        def _help(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            reply(message, admin.help_text())
+
+        @bot.message_handler(commands=["uc_stats"])
+        def _stats(message):  # pragma: no cover
+            if not guard(message):
+                return
+            reply(message, admin.stats())
+
         @bot.message_handler(commands=["uc_order"])
         def _order(message):  # pragma: no cover - requires telebot
             if not guard(message):

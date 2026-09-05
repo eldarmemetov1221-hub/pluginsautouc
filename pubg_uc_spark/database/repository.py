@@ -290,6 +290,27 @@ class Repository:
             (order_id, code_id, level, event, message, _now()),
         )
 
+    # ------------------------------------------------------------------ #
+    # Stats
+    # ------------------------------------------------------------------ #
+    def order_status_counts(self, today_only: bool = False) -> dict:
+        sql = "SELECT status, COUNT(*) c FROM orders"
+        params: tuple = ()
+        if today_only:
+            sql += " WHERE created_at LIKE ?"
+            params = (f"{_now()[:10]}%",)
+        sql += " GROUP BY status"
+        return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
+
+    def code_status_counts(self, today_only: bool = False) -> dict:
+        sql = "SELECT status, COUNT(*) c FROM codes"
+        params: tuple = ()
+        if today_only:
+            sql += " WHERE created_at LIKE ?"
+            params = (f"{_now()[:10]}%",)
+        sql += " GROUP BY status"
+        return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
+
     def get_logs_for_order(self, order_id: int) -> List[dict]:
         rows = self.db.query_all(
             "SELECT * FROM logs WHERE order_id = ? ORDER BY id ASC", (order_id,)
