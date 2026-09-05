@@ -78,7 +78,9 @@ def test_admin_watchdog_command(tmp_path):
     # stall
     assert "25" in admin.watchdog_cmd("stall", "25")
     assert wc.read()["stall_minutes"] == 25
-    assert "Usage" in admin.watchdog_cmd("stall", "abc")
+    # bad argument -> usage hint (and stall value unchanged)
+    assert "stall" in admin.watchdog_cmd("stall", "abc").lower()
+    assert wc.read()["stall_minutes"] == 25
 
 
 def test_admin_watchdog_unconfigured():
