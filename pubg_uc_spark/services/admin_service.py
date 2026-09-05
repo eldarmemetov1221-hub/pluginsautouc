@@ -95,6 +95,28 @@ class AdminService:
         self.repo.add_log("admin_set_status", new_status.value, order_id=order.id)
         return f"Order #{funpay_order_id} status forced to {new_status.value}."
 
+    def skip(self, funpay_order_id: str) -> str:
+        """Pre-mark an order as CANCELLED so the plugin never auto-redeems it.
+
+        Use this when you fulfilled an order MANUALLY (e.g. during a FunPay/
+        network outage): once connectivity returns and FunPayCardinal replays the
+        missed NEW_ORDER / NEW_MESSAGE events, the plugin will see the order is
+        cancelled and do nothing - no double top-up. Works even if the order is
+        not in the DB yet (it is created in CANCELLED state).
+        """
+        oid = str(funpay_order_id)
+        order = self.repo.get_order_by_funpay_id(oid)
+        if order is None:
+            from ..database.models import OrderRecord
+            order = self.repo.create_order(
+                OrderRecord(funpay_order_id=oid, lot_id="", status=OrderStatus.CANCELLED.value)
+            )
+        self.repo.set_order_status(order.id, OrderStatus.CANCELLED, force=True)
+        self.repo.add_log("admin_skip", "manual fulfilment - auto-redeem disabled",
+                          order_id=order.id)
+        return (f"Order #{oid} marked CANCELLED - the plugin will NOT auto-redeem it "
+                f"(use this after manual fulfilment).")
+
     def resend_ask(self, funpay_order_id: str) -> str:
         """Manually ask the buyer for their UID (the bot never does this auto)."""
         order = self.repo.get_order_by_funpay_id(str(funpay_order_id))

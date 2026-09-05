@@ -225,6 +225,13 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             a = _args(message)
             reply(message, admin.resend_ask(a[0]) if a else "Usage: /uc_resend <funpay_order_id>")
 
+        @bot.message_handler(commands=["uc_skip"])
+        def _skip(message):  # pragma: no cover
+            if not guard(message):
+                return
+            a = _args(message)
+            reply(message, admin.skip(a[0]) if a else "Usage: /uc_skip <funpay_order_id>")
+
         log.info("Admin commands registered")
     except Exception:
         log.exception("Failed to register admin commands")

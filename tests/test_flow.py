@@ -224,6 +224,19 @@ def test_multi_quantity_partial(plugin, cardinal):
     assert any("1 из 3" in t and "частично" in t for t in cardinal.texts_to("chat-1"))
 
 
+# 18. /uc_skip: manually-fulfilled order is not auto-redeemed on event replay.
+def test_admin_skip_prevents_redeem(plugin, cardinal):
+    # admin marks the order to skip BEFORE the (replayed) events arrive
+    plugin.admin.skip("SKIP1")
+    # now the outage ends and FunPay replays NEW_ORDER + the buyer's UID
+    plugin.on_new_order(make_order(cardinal, "SKIP1", buyer_id="Z", chat_id="cZ"))
+    _msg(plugin, cardinal, "Z", "cZ", VALID, "mz")
+    order = plugin.repo.get_order_by_funpay_id("SKIP1")
+    assert order.status == OrderStatus.CANCELLED.value
+    # nothing was redeemed
+    assert plugin.repo.get_codes_for_order(order.id) == []
+
+
 # 15. One buyer with multiple orders -> UID applies to the oldest active order.
 def test_one_buyer_multiple_orders(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "3001", buyer_id="C", chat_id="cC"))
