@@ -152,15 +152,18 @@ def test_duplicate_message_event(plugin, cardinal):
     assert len(_codes(plugin, "1010")) == 1
 
 
-# 9/10/11. Temporary Spark error -> retries then TEMPORARY_ERROR.
-def test_temporary_error_retries(plugin, cardinal):
+# 9/10/11. Temporary Spark error -> retries then FINAL failure (no auto-retry).
+def test_temporary_error_exhausted_is_final(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "1011"))
     _msg(plugin, cardinal, "buyer-1", "chat-1", TEMP, "m8")
     order = plugin.repo.get_order_by_funpay_id("1011")
-    assert order.status == OrderStatus.TEMPORARY_ERROR.value
+    assert order.status == OrderStatus.ERROR.value
     code = plugin.repo.get_codes_for_order(order.id)[0]
-    assert code.status == CodeStatus.TEMPORARY_ERROR.value
+    assert code.status == CodeStatus.FAILED.value
     assert code.attempts == plugin.cfg.max_retries
+    # It must NEVER auto-retry: a restart resume does nothing with it.
+    assert plugin.orders.resume_unfinished() == 0
+    assert _order_status(plugin, "1011") == OrderStatus.ERROR.value
 
 
 # 12. Critical / unknown Spark response -> FAILED + ERROR, no retry.
@@ -174,14 +177,21 @@ def test_critical_error(plugin, cardinal):
     assert code.attempts == 1
 
 
-# 13. Restart recovery: a stuck redeem is re-run.
-def test_restart_recovery(plugin, cardinal):
+# 13. Restart recovery: only a genuinely interrupted check (CHECKING) is resumed.
+def test_restart_recovery_resumes_only_checking(plugin, cardinal):
+    from pubg_uc_spark.database.models import CodeRecord, CodeStatus, OrderStatus
+    from pubg_uc_spark.utils.validators import code_hash
+
     plugin.on_new_order(make_order(cardinal, "1013"))
-    _msg(plugin, cardinal, "buyer-1", "chat-1", TEMP, "m10")
     order = plugin.repo.get_order_by_funpay_id("1013")
-    assert order.status == OrderStatus.TEMPORARY_ERROR.value
-    code = plugin.repo.get_codes_for_order(order.id)[0]
-    plugin.db.execute("UPDATE codes SET code = ? WHERE id = ?", (VALID2, code.id))
+    # Simulate a check interrupted by a crash: a code left in CHECKING.
+    rec = CodeRecord(code=VALID, code_hash=code_hash(VALID), order_id=order.id,
+                     funpay_order_id="1013", buyer_id="buyer-1", product="60 UC",
+                     status=CodeStatus.CHECKING.value)
+    plugin.repo.create_code(rec)
+    plugin.repo.set_order_status(order.id, OrderStatus.CODE_RECEIVED)
+    plugin.repo.set_order_status(order.id, OrderStatus.CHECKING)
+
     resumed = plugin.orders.resume_unfinished()
     assert resumed == 1
     assert _order_status(plugin, "1013") == OrderStatus.VALID.value

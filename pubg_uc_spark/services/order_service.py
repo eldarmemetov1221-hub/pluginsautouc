@@ -253,28 +253,35 @@ class OrderService:
             self._notify_admin(f"🛑 Order #{oid}: Spark error: {result.message}")
             return
 
-        # --- Temporary error, retries exhausted (still retriable later) ---
+        # --- Temporary error, retries exhausted -> FINAL failure ---
+        # After MAX_RETRIES the code is marked FAILED (not TEMPORARY_ERROR), so it
+        # is NEVER auto-redeemed again - not on restart, not on a repeat message.
+        # Only an explicit admin /uc_recheck can retry it.
         if isinstance(error, SparkTemporaryError):
             self.repo.update_code(
                 code_id,
-                status=CodeStatus.TEMPORARY_ERROR,
-                error_message=str(error),
+                status=CodeStatus.FAILED,
+                spark_status="TEMPORARY_ERROR",
+                error_message=f"retries exhausted: {error}",
                 attempts=attempts,
+                checked=True,
             )
             if order:
-                self.repo.set_order_status(order.id, OrderStatus.TEMPORARY_ERROR)
-            log.warning("[Order #%s] Temporary error after %s attempts", oid, attempts)
+                self.repo.set_order_status(order.id, OrderStatus.ERROR)
+            log.error("[Order #%s] FAILED after %s attempts (no auto-retry): %s", oid, attempts, error)
             self.repo.add_log(
-                "temporary_error", str(error), level="WARNING",
+                "failed_retries_exhausted", str(error), level="ERROR",
                 order_id=code.order_id, code_id=code_id,
             )
             if order and order.chat_id:
                 self.messenger.send_once(
-                    f"temp:{code_id}",
+                    f"result:{code_id}",
                     order.chat_id,
-                    self._fmt(order, self.cfg.messages.temporary_error, uid),
+                    self._fmt(order, self.cfg.messages.error, uid),
                 )
-            self._notify_admin(f"⚠️ Order #{oid}: temporary error after {attempts} attempts: {error}")
+            self._notify_admin(
+                f"🛑 Order #{oid}: FAILED after {attempts} attempts (manual action needed): {error}"
+            )
             return
 
         # --- Critical / unknown -> final failure; tell buyer + admin ---

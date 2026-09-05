@@ -255,10 +255,14 @@ class Repository:
         return code.attempts if code else 0
 
     def get_retriable_codes(self) -> List[CodeRecord]:
-        """Codes stuck in a retriable/mid-flight state (restart recovery)."""
+        """Codes to resume on restart: ONLY genuinely interrupted checks
+        (status CHECKING). Codes that already exhausted their retries are marked
+        FAILED and are intentionally NOT resumed - they never auto-redeem again
+        (only an admin /uc_recheck can).
+        """
         rows = self.db.query_all(
-            "SELECT * FROM codes WHERE status IN (?, ?)",
-            (CodeStatus.TEMPORARY_ERROR.value, CodeStatus.CHECKING.value),
+            "SELECT * FROM codes WHERE status = ?",
+            (CodeStatus.CHECKING.value,),
         )
         return [self._row_to_code(r) for r in rows]
 
