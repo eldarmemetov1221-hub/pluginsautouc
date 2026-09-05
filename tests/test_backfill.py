@@ -272,6 +272,27 @@ def test_watchdog_mode_runs_and_consumes_trigger(tmp_path):
     p.stop()
 
 
+def test_backfill_background_runs_off_thread(tmp_path):
+    import time
+
+    acct = BackfillAccount(
+        sales=[_paid_sale("ORDBG")],
+        histories={"chat-1": [FakeMessage("m1", "buyer-1", "chat-1", "123456789")]},
+    )
+    p = _plugin(_cfg(tmp_path), BackfillCardinal(acct))
+    r = p.run_backfill(background=True)
+    assert r == {"scheduled": True}
+
+    # thread finishes shortly after
+    for _ in range(50):
+        if p.repo.get_order_by_funpay_id("ORDBG") is not None:
+            break
+        time.sleep(0.02)
+    order = p.repo.get_order_by_funpay_id("ORDBG")
+    assert order is not None and order.status == OrderStatus.VALID.value
+    p.stop()
+
+
 def test_reconciler_parses_plain_list_of_shortcuts(tmp_path):
     # Some API variants return a bare list rather than (next, list).
     class ListAccount(BackfillAccount):

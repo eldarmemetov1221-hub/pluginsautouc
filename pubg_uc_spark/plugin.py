@@ -79,16 +79,33 @@ class Plugin:
             resumed,
         )
 
-    def run_backfill(self, force: bool = False) -> dict:
+    def run_backfill(self, force: bool = False, background: bool = False) -> dict:
         """Recover orders missed while Cardinal was offline. Runs after the
         account is logged in (post_init) and on demand via /uc_backfill.
 
         FunPayCardinal does not replay orders that arrived during downtime, so
         without this a restart (manual or by a watchdog) leaves those orders
         unfulfilled. ``force=True`` (the admin command) bypasses BACKFILL_MODE
-        and the watchdog trigger. Best-effort: never lets a FunPay error break
-        startup.
+        and the watchdog trigger.
+
+        ``background=True`` runs it on a daemon thread and returns immediately -
+        used at startup so scanning many open sales (each with a throttled
+        FunPay history read) never blocks Cardinal from starting its event
+        runner. Idempotency guards make concurrent live events safe.
         """
+        if background:
+            import threading
+
+            threading.Thread(
+                target=self._run_backfill_safe,
+                args=(force,),
+                name="pubg-uc-spark-backfill",
+                daemon=True,
+            ).start()
+            return {"scheduled": True}
+        return self._run_backfill_safe(force)
+
+    def _run_backfill_safe(self, force: bool) -> dict:
         try:
             return self.reconciler.run(force=force)
         except Exception:  # pragma: no cover - defensive
@@ -169,7 +186,9 @@ def post_init(cardinal, *args) -> None:
     """
     if _plugin is None:
         init(cardinal)
-    _plugin.run_backfill()
+    # Background so a large scan (many throttled FunPay history reads) never
+    # blocks Cardinal from starting its event runner.
+    _plugin.run_backfill(background=True)
 
 
 def on_new_order(cardinal, event, *args) -> None:

@@ -124,36 +124,11 @@ class Reconciler:
             if lot is None:
                 continue
             stats["tracked"] += 1
-
-            existing = self.repo.get_order_by_funpay_id(fid)
-            if existing is not None:
-                stats["already_known"] += 1
-                # Known but still waiting? The buyer may have sent the UID during
-                # the outage - try to recover it.
-                if (
-                    self.cfg.backfill_read_history
-                    and OrderStatus(existing.status) in _UID_RECOVERABLE
-                    and self._try_recover_uid(existing, shortcut)
-                ):
-                    stats["uid_recovered"] += 1
-                continue
-
-            # A genuinely missed order: register it, then try its UID.
-            record = funpay_orders.build_order_record(shortcut, lot)
-            if not record.funpay_order_id:
-                continue
-            # Mark the order event as seen so a (hypothetical) live NEW_ORDER for
-            # the same id becomes a no-op; create_order is idempotent regardless.
-            self.repo.mark_event_processed(f"order:{fid}")
-            order = self.orders.handle_new_order(record)
-            stats["registered"] += 1
-            log.info(
-                "[Backfill] Registered missed order #%s (lot=%s buyer=%s qty=%s)",
-                fid, lot.lot_id, record.buyer_username, record.quantity,
-            )
-            if self.cfg.backfill_read_history and order is not None:
-                if self._try_recover_uid(order, shortcut):
-                    stats["uid_recovered"] += 1
+            # One bad order / chat read must not abort the whole scan.
+            try:
+                self._process_sale(shortcut, fid, lot, stats)
+            except Exception:  # pragma: no cover - defensive
+                log.exception("[Backfill] Error processing sale #%s", fid)
 
         if stats["registered"] or stats["uid_recovered"]:
             log.info("[Backfill] Recovered: %s", stats)
@@ -164,6 +139,37 @@ class Reconciler:
                 stats["scanned"], stats["tracked"],
             )
         return stats
+
+    def _process_sale(self, shortcut, fid: str, lot, stats: dict) -> None:
+        existing = self.repo.get_order_by_funpay_id(fid)
+        if existing is not None:
+            stats["already_known"] += 1
+            # Known but still waiting? The buyer may have sent the UID during
+            # the outage - try to recover it.
+            if (
+                self.cfg.backfill_read_history
+                and OrderStatus(existing.status) in _UID_RECOVERABLE
+                and self._try_recover_uid(existing, shortcut)
+            ):
+                stats["uid_recovered"] += 1
+            return
+
+        # A genuinely missed order: register it, then try its UID.
+        record = funpay_orders.build_order_record(shortcut, lot)
+        if not record.funpay_order_id:
+            return
+        # Mark the order event as seen so a (hypothetical) live NEW_ORDER for the
+        # same id becomes a no-op; create_order is idempotent regardless.
+        self.repo.mark_event_processed(f"order:{fid}")
+        order = self.orders.handle_new_order(record)
+        stats["registered"] += 1
+        log.info(
+            "[Backfill] Registered missed order #%s (lot=%s buyer=%s qty=%s)",
+            fid, lot.lot_id, record.buyer_username, record.quantity,
+        )
+        if self.cfg.backfill_read_history and order is not None:
+            if self._try_recover_uid(order, shortcut):
+                stats["uid_recovered"] += 1
 
     # ------------------------------------------------------------------ #
     # Startup gating (BACKFILL_MODE + watchdog trigger)
