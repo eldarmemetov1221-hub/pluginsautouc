@@ -353,6 +353,11 @@ class Config:
     stock_low_threshold: int = field(
         default_factory=lambda: max(0, _get_int("STOCK_LOW_THRESHOLD", 10))
     )
+    # Stock menu demand window: packs consumed by delivered orders over the last
+    # N days are compared to current stock to show what to restock. 0 = all time.
+    stock_demand_days: int = field(
+        default_factory=lambda: max(0, _get_int("STOCK_DEMAND_DAYS", 30))
+    )
 
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the

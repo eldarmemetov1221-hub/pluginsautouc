@@ -30,23 +30,50 @@ def _lots():
     return {k: LotConfig(k, p, uc, picks) for k, (p, uc, picks) in raw.items()}
 
 
-def test_stock_report_matches_real_data():
+class _FakeRepo:
+    """Returns a delivered-orders set matching the user's real sales counts."""
+    def __init__(self, counts):
+        # counts: {lot_key: number_of_orders}
+        self._orders = []
+        for k, n in counts.items():
+            self._orders += [{"lot_id": k, "quantity": 1}] * n
+
+    def delivered_orders(self, days=None):
+        return list(self._orders)
+
+
+def test_stock_report_demand_vs_stock():
     c = Config()
     c.lots = _lots()
     c.stock_low_threshold = 10
+    c.stock_demand_days = 30
+    # sales counts per lot (from the real screenshots)
+    counts = {"60l": 5, "120l": 6, "180l": 3, "300l": 3, "325l": 2, "360l": 5,
+              "445l": 4, "600l": 3, "660l": 3, "720l": 3, "900l": 2, "1045l": 2,
+              "1320l": 3, "1500l": 3}
+    admin = AdminService(c, repo=_FakeRepo(counts), order_service=None)
     stock = {"60": 42, "325": 17, "660": 5, "1800": 0, "3850": 0, "8100": 0}
-    admin = AdminService(c, repo=None, order_service=None)
     txt = admin.stock_report(stock)
 
-    # max sellable per lot (floor of stock / packs, min over packs)
-    assert "180 UC: 14 шт" in txt        # 42//3
-    assert "1320 UC: 2 шт" in txt        # 5//2
-    assert "1500 UC: 2 шт" in txt        # min(5//2, 42//3)=2
-    assert "660 UC: 5 шт" in txt         # 660 pack = 5
-    # 660 is the bottleneck (<=10) -> deficit; 60/325 are fine
-    assert "660" in txt.split("Мало/нет:")[1]
-    # unused packs (1800/3850/8100) are not warned about
-    assert "1800" not in txt.split("Мало/нет:")[1]
+    # demand: 60->61, 325->16, 660->25 ; stock 42/17/5 -> restock 19/0/20
+    assert "докупить 20" in txt          # 660: 25-5
+    assert "докупить 19" in txt          # 60: 61-42
+    assert "660×20" in txt and "60×19" in txt
+    assert "325" in txt                  # shown, but no restock (17>=16)
+    # 325 has no restock line
+    assert "325×" not in txt
+    # no "поштучно" wording anymore
+    assert "оштучно" not in txt
+
+
+def test_stock_report_no_repo_lists_stock():
+    c = Config()
+    c.lots = _lots()
+    c.stock_low_threshold = 10
+    admin = AdminService(c, repo=None, order_service=None)
+    txt = admin.stock_report({"60": 42, "325": 17, "660": 5})
+    assert "660 UC" in txt and "в наличии 5" in txt
+    assert "оштучно" not in txt
 
 
 def test_stock_summary_parses_by_denomination(tmp_path):

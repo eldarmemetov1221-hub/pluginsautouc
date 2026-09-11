@@ -42,50 +42,76 @@ class AdminService:
             "/uc_stock — остатки стока Spark и каких пачек не хватает"
         )
 
+    def _pack_demand(self) -> dict:
+        """Packs consumed by delivered orders over the demand window
+        (STOCK_DEMAND_DAYS): {denom: total_count}. Empty if no repo/orders."""
+        demand: dict = {}
+        if self.repo is None:
+            return demand
+        days = int(getattr(self.cfg, "stock_demand_days", 30)) or None
+        try:
+            orders = self.repo.delivered_orders(days)
+        except Exception:
+            return demand
+        for o in orders:
+            lot = self.cfg.lot(o.get("lot_id"))
+            if not lot:
+                continue
+            for denom, cnt in lot.picks_for(o.get("quantity") or 1).items():
+                demand[str(denom)] = demand.get(str(denom), 0) + cnt
+        return demand
+
     def stock_report(self, stock: dict) -> str:
-        """Format the Spark stock vs active lots. ``stock`` = {denom: count}."""
+        """Spark stock vs demand: what's in stock and how much to restock.
+
+        ``stock`` = {denom: available_count}.
+        """
         low = int(getattr(self.cfg, "stock_low_threshold", 10))
+        days = int(getattr(self.cfg, "stock_demand_days", 30))
 
-        # Which base packs are actually used by active lots.
-        used = set()
-        for lot in self.cfg.lots.values():
-            used.update(str(k) for k in lot.base_picks().keys())
-
-        def _uc(lot):
-            try:
-                return int(lot.uc)
-            except (TypeError, ValueError):
-                return 0
-
-        lines = ["📦 Сток Spark", "", "Пачки в наличии:"]
+        # Packs actually used by active lots.
+        used = []
+        seen = set()
         for d in SPARK_BASE_DENOMINATIONS:
-            if d not in used and int(stock.get(d, 0)) == 0:
-                continue  # skip unused empty denominations (1800/3850/8100)
-            n = int(stock.get(d, 0))
-            mark = " ❌" if n == 0 else (" ⚠️" if n <= low else "")
-            tail = "" if d in used else "  (не используется)"
-            lines.append(f"  {d} UC: {n}{mark}{tail}")
+            for lot in self.cfg.lots.values():
+                if d in lot.base_picks() and d not in seen:
+                    used.append(d)
+                    seen.add(d)
+                    break
 
-        lines.append("")
-        lines.append("Можно продать сейчас (поштучно по каждому лоту):")
-        for lot in sorted(self.cfg.lots.values(), key=_uc):
-            picks = lot.base_picks()
-            caps = [int(stock.get(str(d), 0)) // c for d, c in picks.items() if c]
-            maxu = min(caps) if caps else 0
-            mark = " ❌ нет стока" if maxu == 0 else (" ⚠️" if maxu <= 2 else "")
-            lines.append(f"  {lot.product}: {maxu} шт{mark}")
+        demand = self._pack_demand()
 
-        deficit = [d for d in SPARK_BASE_DENOMINATIONS
-                   if d in used and int(stock.get(d, 0)) <= low]
-        lines.append("")
-        if deficit:
-            lines.append("⚠️ Мало/нет: " + ", ".join(
-                f"{d} ({int(stock.get(d, 0))})" for d in deficit))
+        rows = []           # (denom, have, need, restock)
+        for d in used:
+            have = int(stock.get(d, 0))
+            need = int(demand.get(d, 0))
+            restock = max(0, need - have)
+            rows.append((d, have, need, restock))
+        # Most urgent first: biggest restock, then lowest stock.
+        rows.sort(key=lambda r: (-r[3], r[1]))
+
+        header = "📦 Сток Spark"
+        period = ("за всё время" if days == 0 else f"спрос за {days} дн.")
+        out = [header, period, ""]
+
+        has_demand = any(n for _, _, n, _ in rows)
+        to_buy = []
+        for d, have, need, restock in rows:
+            if restock > 0:
+                icon = "🟥" if have == 0 or have <= low else "🟠"
+                out.append(f"{icon} {d} UC — в наличии {have}, продано {need} → докупить {restock}")
+                to_buy.append(f"{d}×{restock}")
+            else:
+                low_mark = " ⚠️ мало" if have <= low else ""
+                tail = f", продано {need}" if has_demand else ""
+                out.append(f"🟢 {d} UC — в наличии {have}{tail}{low_mark}")
+
+        out.append("")
+        if to_buy:
+            out.append("🛒 Докупить: " + ", ".join(to_buy))
         else:
-            lines.append("✅ Стока достаточно по всем пачкам.")
-        lines.append("\n«Поштучно» = сколько единиц лота можно выдать, если продавать "
-                     "только его (пачки 660/60 общие для многих номиналов).")
-        return "\n".join(lines)
+            out.append("✅ Стока хватает под текущий спрос.")
+        return "\n".join(out)
 
     def finance(self) -> str:
         """Revenue / commission / cost / net profit over delivered orders."""

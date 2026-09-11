@@ -11,7 +11,7 @@ guarantees:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ..errors import CriticalError
@@ -321,6 +321,19 @@ class Repository:
             sql += " AND created_at LIKE ?"
             params = (OrderStatus.VALID.value, f"{_now()[:10]}%")
         return [dict(r) for r in self.db.query_all(sql, params)]
+
+    def delivered_orders(self, days: Optional[int] = None) -> List[dict]:
+        """Delivered (VALID) orders as {lot_id, quantity}, optionally only those
+        created within the last ``days`` (for stock-demand estimation)."""
+        sql = "SELECT lot_id, quantity FROM orders WHERE status = ?"
+        params: list = [OrderStatus.VALID.value]
+        if days and days > 0:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=days)
+            ).isoformat(timespec="seconds")
+            sql += " AND created_at >= ?"
+            params.append(cutoff)
+        return [dict(r) for r in self.db.query_all(sql, tuple(params))]
 
     def get_logs_for_order(self, order_id: int) -> List[dict]:
         rows = self.db.query_all(
