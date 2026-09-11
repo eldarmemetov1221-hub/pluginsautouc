@@ -341,6 +341,14 @@ class Config:
         default_factory=lambda: _get_float("COMMISSION_PERCENT", 3.0)
     )
     pack_costs: Dict[str, float] = field(default_factory=_default_pack_costs)
+    # Runtime-editable finance settings (via the Telegram /uc_prices menu) are
+    # persisted here as JSON so edits survive restarts. Default: next to .env.
+    finance_config_file: str = field(
+        default_factory=lambda: _get(
+            "FINANCE_CONFIG_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "finance.json"),
+        )
+    )
 
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the

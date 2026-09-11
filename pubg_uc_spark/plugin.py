@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .config import Config, get_config
+from .config import Config, SPARK_BASE_DENOMINATIONS, get_config
 from .database.db import Database
 from .database.repository import Repository
 from .errors import SparkCriticalError
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
 from .services.admin_service import AdminService
+from .services.finance_store import FinanceStore
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
 from .spark.client import SparkChecker
@@ -41,6 +42,7 @@ class Plugin:
         )
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
         self.admin = AdminService(self.cfg, self.repo, self.orders)
+        self.finance_store = FinanceStore(self.cfg)
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
@@ -61,6 +63,7 @@ class Plugin:
     # ------------------------------------------------------------------ #
     def start(self) -> None:
         self.retry.start()
+        self.finance_store.load_into_cfg()
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, lots=%s, resumed=%s)",
@@ -250,7 +253,130 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         def _finance(message):  # pragma: no cover - requires telebot
             if not guard(message):
                 return
-            reply(message, admin.finance())
+            reply(message, admin.finance() + "\n\n⚙️ Настроить цены: /uc_prices")
+
+        # ---- Interactive price/commission menu (/uc_prices) ---- #
+        def _fmt_money(v):
+            try:
+                return f"{float(v):g}"
+            except (TypeError, ValueError):
+                return "0"
+
+        def _menu_markup():
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(types.InlineKeyboardButton(
+                f"Комиссия: {_fmt_money(cfg.commission_percent)}%", callback_data="ucfin:comm"))
+            btns = [
+                types.InlineKeyboardButton(
+                    f"{d}: {_fmt_money(cfg.pack_costs.get(d, 0))}₽",
+                    callback_data=f"ucfin:pack:{d}")
+                for d in SPARK_BASE_DENOMINATIONS
+            ]
+            kb.add(*btns)
+            kb.add(
+                types.InlineKeyboardButton("💰 Отчёт", callback_data="ucfin:report"),
+                types.InlineKeyboardButton("🔄 Обновить", callback_data="ucfin:refresh"),
+            )
+            kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
+            return kb
+
+        def _menu_text():
+            lines = "\n".join(
+                f"  {d} UC: {_fmt_money(cfg.pack_costs.get(d, 0))} ₽"
+                for d in SPARK_BASE_DENOMINATIONS
+            )
+            return (
+                "⚙️ Настройки финансов\n\n"
+                f"Комиссия FunPay: {_fmt_money(cfg.commission_percent)}%\n"
+                "Себестоимость пачек Spark:\n"
+                f"{lines}\n\n"
+                "Нажми кнопку, чтобы изменить значение."
+            )
+
+        def _force_reply():
+            from telebot import types
+            return types.ForceReply(selective=False)
+
+        def _parse_num(text):
+            import re
+            m = re.search(r"[0-9]+(?:[.,][0-9]+)?", str(text or ""))
+            return float(m.group(0).replace(",", ".")) if m else None
+
+        def _show_menu(chat_id):
+            bot.send_message(chat_id, _menu_text(), reply_markup=_menu_markup())
+
+        @bot.message_handler(commands=["uc_prices"])
+        def _prices(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            _show_menu(message.chat.id)
+
+        def _set_commission(message):  # pragma: no cover
+            if not guard(message):
+                return
+            v = _parse_num(getattr(message, "text", ""))
+            if v is None:
+                reply(message, "Не похоже на число. Изменение отменено.")
+                return
+            plugin.finance_store.set_commission(v)
+            reply(message, f"✅ Комиссия FunPay: {_fmt_money(v)}%")
+            _show_menu(message.chat.id)
+
+        def _set_pack(message, denom):  # pragma: no cover
+            if not guard(message):
+                return
+            v = _parse_num(getattr(message, "text", ""))
+            if v is None:
+                reply(message, "Не похоже на число. Изменение отменено.")
+                return
+            plugin.finance_store.set_pack_cost(denom, v)
+            reply(message, f"✅ Себестоимость {denom} UC: {_fmt_money(v)} ₽")
+            _show_menu(message.chat.id)
+
+        @bot.callback_query_handler(func=lambda c: (getattr(c, "data", "") or "").startswith("ucfin:"))
+        def _fin_cb(call):  # pragma: no cover - requires telebot
+            uid = getattr(getattr(call, "from_user", None), "id", None)
+            if not cfg.is_admin(uid):
+                return
+            data = call.data or ""
+            chat_id = call.message.chat.id
+            try:
+                if data == "ucfin:close":
+                    bot.answer_callback_query(call.id)
+                    try:
+                        bot.delete_message(chat_id, call.message.message_id)
+                    except Exception:
+                        pass
+                    return
+                if data == "ucfin:refresh":
+                    bot.answer_callback_query(call.id, "Обновлено")
+                    try:
+                        bot.edit_message_text(_menu_text(), chat_id, call.message.message_id,
+                                              reply_markup=_menu_markup())
+                    except Exception:
+                        _show_menu(chat_id)
+                    return
+                if data == "ucfin:report":
+                    bot.answer_callback_query(call.id)
+                    bot.send_message(chat_id, admin.finance())
+                    return
+                if data == "ucfin:comm":
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(chat_id, "Введите комиссию FunPay в % (например 3):",
+                                         reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, _set_commission)
+                    return
+                if data.startswith("ucfin:pack:"):
+                    denom = data.split(":", 2)[2]
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(
+                        chat_id, f"Введите себестоимость пачки {denom} UC в ₽ (число):",
+                        reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, lambda msg: _set_pack(msg, denom))
+                    return
+            except Exception:
+                log.exception("Finance menu callback failed")
 
         log.info("Admin commands registered")
     except Exception:

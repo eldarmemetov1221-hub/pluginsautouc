@@ -13,3 +13,6 @@ venv/
 .heartbeat
 .watchdog
 .backfill_request
+
+# Runtime finance settings (edited via Telegram /uc_prices)
+finance.json
