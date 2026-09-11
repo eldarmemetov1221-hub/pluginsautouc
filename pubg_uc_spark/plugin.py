@@ -25,6 +25,10 @@ from .utils.logger import get_logger
 
 log = get_logger("plugin")
 
+# Must match UUID in plugins/pubg_uc_spark.py - used to catch FPC's plugin-card
+# "Настройки" callback for THIS plugin.
+PLUGIN_UUID = "8f3a2c10-9b7e-4d5a-8c21-1f6e37330959"
+
 
 class Plugin:
     """Holds the wired object graph for one FPC instance."""
@@ -287,11 +291,11 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 for d in SPARK_BASE_DENOMINATIONS
             )
             return (
-                "⚙️ Настройки финансов\n\n"
+                "📊 Статистика и цены\n\n"
                 f"Комиссия FunPay: {_fmt_money(cfg.commission_percent)}%\n"
                 "Себестоимость пачек Spark:\n"
                 f"{lines}\n\n"
-                "Нажми кнопку, чтобы изменить значение."
+                "Нажми «💰 Отчёт» для прибыли, или кнопку значения, чтобы изменить."
             )
 
         def _force_reply():
@@ -377,6 +381,25 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     return
             except Exception:
                 log.exception("Finance menu callback failed")
+
+        # FPC's plugin-card "⚙️ Настройки" button (shown because SETTINGS_PAGE=True)
+        # -> open our stats/prices menu. Resolve FPC's callback prefix at runtime.
+        try:
+            from tg_bot import CBT as _CBT  # type: ignore
+            _PS = getattr(_CBT, "PLUGIN_SETTINGS", "plugin_settings")
+        except Exception:
+            _PS = "plugin_settings"
+
+        @bot.callback_query_handler(
+            func=lambda c: (getattr(c, "data", "") or "").startswith(f"{_PS}:")
+            and PLUGIN_UUID in (c.data or "")
+        )
+        def _open_settings(call):  # pragma: no cover - requires telebot
+            if not cfg.is_admin(getattr(getattr(call, "from_user", None), "id", None)):
+                bot.answer_callback_query(call.id, "Нет доступа")
+                return
+            bot.answer_callback_query(call.id)
+            _show_menu(call.message.chat.id)
 
         log.info("Admin commands registered")
     except Exception:

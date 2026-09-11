@@ -32,7 +32,9 @@ DESCRIPTION = (
 )
 CREDITS = "@pubg_uc_spark"
 UUID = "8f3a2c10-9b7e-4d5a-8c21-1f6e37330959"
-SETTINGS_PAGE = False
+# True -> FPC shows a "⚙️ Настройки" button on the plugin card that opens our
+# stats/prices menu (handled in pubg_uc_spark/plugin.py).
+SETTINGS_PAGE = True
 
 
 def _init(cardinal, *args):
