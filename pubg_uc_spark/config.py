@@ -349,6 +349,10 @@ class Config:
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "finance.json"),
         )
     )
+    # A Spark pack at/below this count is flagged as low (⚠️) in the stock menu.
+    stock_low_threshold: int = field(
+        default_factory=lambda: max(0, _get_int("STOCK_LOW_THRESHOLD", 10))
+    )
 
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the

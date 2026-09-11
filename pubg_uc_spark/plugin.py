@@ -280,9 +280,12 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             kb.add(*btns)
             kb.add(
                 types.InlineKeyboardButton("💰 Отчёт", callback_data="ucfin:report"),
-                types.InlineKeyboardButton("🔄 Обновить", callback_data="ucfin:refresh"),
+                types.InlineKeyboardButton("📦 Сток", callback_data="ucfin:stock"),
             )
-            kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
+            kb.add(
+                types.InlineKeyboardButton("🔄 Обновить", callback_data="ucfin:refresh"),
+                types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
+            )
             return kb
 
         def _menu_text():
@@ -309,6 +312,19 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
 
         def _show_menu(chat_id):
             bot.send_message(chat_id, _menu_text(), reply_markup=_menu_markup())
+
+        def _stock_text():
+            try:
+                stock = plugin.checker.stock_summary()
+            except Exception as exc:
+                return f"Не удалось получить сток Spark: {exc}"
+            return admin.stock_report(stock)
+
+        @bot.message_handler(commands=["uc_stock"])
+        def _stock(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            reply(message, _stock_text())
 
         @bot.message_handler(commands=["uc_prices"])
         def _prices(message):  # pragma: no cover - requires telebot
@@ -364,6 +380,10 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 if data == "ucfin:report":
                     bot.answer_callback_query(call.id)
                     bot.send_message(chat_id, admin.finance())
+                    return
+                if data == "ucfin:stock":
+                    bot.answer_callback_query(call.id, "Запрашиваю сток...")
+                    bot.send_message(chat_id, _stock_text())
                     return
                 if data == "ucfin:comm":
                     bot.answer_callback_query(call.id)

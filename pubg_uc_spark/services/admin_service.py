@@ -7,6 +7,7 @@ wires these to FPC Telegram commands; access is gated by the admin whitelist
 
 from __future__ import annotations
 
+from ..config import SPARK_BASE_DENOMINATIONS
 from ..database.models import CodeStatus, OrderStatus
 from ..utils.logger import get_logger, mask_code
 
@@ -37,8 +38,54 @@ class AdminService:
             "/uc_skip <order_id> — не начислять (если выдали вручную)\n\n"
             "💰 Финансы:\n"
             "/uc_finance — выручка, комиссия, себестоимость, чистая прибыль\n"
-            "/uc_prices — меню: задать себестоимость пачек и комиссию"
+            "/uc_prices — меню: задать себестоимость пачек и комиссию\n"
+            "/uc_stock — остатки стока Spark и каких пачек не хватает"
         )
+
+    def stock_report(self, stock: dict) -> str:
+        """Format the Spark stock vs active lots. ``stock`` = {denom: count}."""
+        low = int(getattr(self.cfg, "stock_low_threshold", 10))
+
+        # Which base packs are actually used by active lots.
+        used = set()
+        for lot in self.cfg.lots.values():
+            used.update(str(k) for k in lot.base_picks().keys())
+
+        def _uc(lot):
+            try:
+                return int(lot.uc)
+            except (TypeError, ValueError):
+                return 0
+
+        lines = ["📦 Сток Spark", "", "Пачки в наличии:"]
+        for d in SPARK_BASE_DENOMINATIONS:
+            if d not in used and int(stock.get(d, 0)) == 0:
+                continue  # skip unused empty denominations (1800/3850/8100)
+            n = int(stock.get(d, 0))
+            mark = " ❌" if n == 0 else (" ⚠️" if n <= low else "")
+            tail = "" if d in used else "  (не используется)"
+            lines.append(f"  {d} UC: {n}{mark}{tail}")
+
+        lines.append("")
+        lines.append("Можно продать сейчас (поштучно по каждому лоту):")
+        for lot in sorted(self.cfg.lots.values(), key=_uc):
+            picks = lot.base_picks()
+            caps = [int(stock.get(str(d), 0)) // c for d, c in picks.items() if c]
+            maxu = min(caps) if caps else 0
+            mark = " ❌ нет стока" if maxu == 0 else (" ⚠️" if maxu <= 2 else "")
+            lines.append(f"  {lot.product}: {maxu} шт{mark}")
+
+        deficit = [d for d in SPARK_BASE_DENOMINATIONS
+                   if d in used and int(stock.get(d, 0)) <= low]
+        lines.append("")
+        if deficit:
+            lines.append("⚠️ Мало/нет: " + ", ".join(
+                f"{d} ({int(stock.get(d, 0))})" for d in deficit))
+        else:
+            lines.append("✅ Стока достаточно по всем пачкам.")
+        lines.append("\n«Поштучно» = сколько единиц лота можно выдать, если продавать "
+                     "только его (пачки 660/60 общие для многих номиналов).")
+        return "\n".join(lines)
 
     def finance(self) -> str:
         """Revenue / commission / cost / net profit over delivered orders."""

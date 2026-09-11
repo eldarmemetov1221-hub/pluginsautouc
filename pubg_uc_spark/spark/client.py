@@ -29,6 +29,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional
 
+from ..config import SPARK_BASE_DENOMINATIONS
 from ..errors import SparkCriticalError, SparkTemporaryError
 from ..utils.logger import get_logger, mask_code
 from . import parser
@@ -61,6 +62,32 @@ class SparkChecker:
         if self.cfg.spark_mock:
             return self._redeem_mock(player_id, picks)
         return self._redeem_http(player_id, picks)
+
+    # ------------------------------------------------------------------ #
+    def stock_summary(self) -> Dict[str, int]:
+        """Return current Spark stock as {denomination: available_count},
+        e.g. {"60": 42, "325": 17, "660": 5}. Raises on transport/auth errors."""
+        if self.cfg.spark_mock:
+            return {d: 0 for d in SPARK_BASE_DENOMINATIONS}
+        if requests is None:  # pragma: no cover
+            raise SparkCriticalError("requests is not installed")
+        if not self.cfg.spark_api_url:
+            raise SparkCriticalError("SPARK_API_URL is not configured")
+        url = f"{self.cfg.spark_api_url}/v1/stock/summary"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=self.cfg.spark_timeout)
+        except Exception as exc:
+            raise SparkTemporaryError(f"Spark stock request failed: {exc}") from exc
+        self._raise_for_transport(resp)
+        data = self._json(resp)
+        raw = data.get("by_denomination_uc") or {}
+        out: Dict[str, int] = {}
+        for k, v in raw.items():
+            try:
+                out[str(k)] = int(v)
+            except (TypeError, ValueError):
+                out[str(k)] = 0
+        return out
 
     # ------------------------------------------------------------------ #
     # Real HTTP transport (async job API).
