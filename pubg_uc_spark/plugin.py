@@ -284,7 +284,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             )
             kb.add(
                 types.InlineKeyboardButton("🔄 Обновить", callback_data="ucfin:refresh"),
-                types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
             )
             return kb
 
@@ -301,6 +301,31 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 "Нажми «💰 Отчёт» для прибыли, или кнопку значения, чтобы изменить."
             )
 
+        # ---- Root menu (opened from the plugin card / /uc_prices) ---- #
+        def _root_markup():
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("📊 Статистика", callback_data="ucfin:menu"),
+                types.InlineKeyboardButton("📦 Сток", callback_data="ucfin:stock"),
+            )
+            kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
+            return kb
+
+        def _root_text():
+            return ("🎮 PUBG UC Spark\n\n"
+                    "📊 Статистика — прибыль, выручка, себестоимость, цены\n"
+                    "📦 Сток — остатки Spark и каких пачек не хватает")
+
+        def _back_markup():
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
+                types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
+            )
+            return kb
+
         def _force_reply():
             from telebot import types
             return types.ForceReply(selective=False)
@@ -312,6 +337,9 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
 
         def _show_menu(chat_id):
             bot.send_message(chat_id, _menu_text(), reply_markup=_menu_markup())
+
+        def _show_root(chat_id):
+            bot.send_message(chat_id, _root_text(), reply_markup=_root_markup())
 
         def _stock_text():
             try:
@@ -330,7 +358,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         def _prices(message):  # pragma: no cover - requires telebot
             if not guard(message):
                 return
-            _show_menu(message.chat.id)
+            _show_root(message.chat.id)
 
         def _set_commission(message):  # pragma: no cover
             if not guard(message):
@@ -369,21 +397,29 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     except Exception:
                         pass
                     return
-                if data == "ucfin:refresh":
-                    bot.answer_callback_query(call.id, "Обновлено")
+                if data in ("ucfin:refresh", "ucfin:menu"):
+                    bot.answer_callback_query(call.id, "Обновлено" if data == "ucfin:refresh" else None)
                     try:
                         bot.edit_message_text(_menu_text(), chat_id, call.message.message_id,
                                               reply_markup=_menu_markup())
                     except Exception:
                         _show_menu(chat_id)
                     return
+                if data == "ucfin:root":
+                    bot.answer_callback_query(call.id)
+                    try:
+                        bot.edit_message_text(_root_text(), chat_id, call.message.message_id,
+                                              reply_markup=_root_markup())
+                    except Exception:
+                        _show_root(chat_id)
+                    return
                 if data == "ucfin:report":
                     bot.answer_callback_query(call.id)
-                    bot.send_message(chat_id, admin.finance())
+                    bot.send_message(chat_id, admin.finance(), reply_markup=_back_markup())
                     return
                 if data == "ucfin:stock":
                     bot.answer_callback_query(call.id, "Запрашиваю сток...")
-                    bot.send_message(chat_id, _stock_text())
+                    bot.send_message(chat_id, _stock_text(), reply_markup=_back_markup())
                     return
                 if data == "ucfin:comm":
                     bot.answer_callback_query(call.id)
@@ -419,7 +455,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 bot.answer_callback_query(call.id, "Нет доступа")
                 return
             bot.answer_callback_query(call.id)
-            _show_menu(call.message.chat.id)
+            _show_root(call.message.chat.id)
 
         log.info("Admin commands registered")
     except Exception:
