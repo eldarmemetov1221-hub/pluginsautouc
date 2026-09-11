@@ -59,13 +59,23 @@ def get_lot_amounts(cardinal, lot_ids) -> dict:
             try:
                 key = int(lid) if str(lid).isdigit() else lid
                 lf = getter(key)
+                fields = getattr(lf, "fields", None)
+
+                # Only ACTIVE lots count. A deactivated lot still has amount >= 1
+                # on FunPay (can't be set to 0), so counting it wrongly inflates
+                # the required packs. -> treat inactive as amount 0.
+                active = getattr(lf, "active", None)
+                if active is None and isinstance(fields, dict):
+                    active = "active" in fields
+                if active is False:
+                    out[str(lid)] = 0
+                    continue
+
                 amt = getattr(lf, "amount", None)
-                if amt is None:
-                    fields = getattr(lf, "fields", None)
-                    if isinstance(fields, dict):
-                        raw = fields.get("amount")
-                        amt = int(raw) if str(raw).strip().isdigit() else None
-                elif not isinstance(amt, int):
+                if amt is None and isinstance(fields, dict):
+                    raw = fields.get("amount")
+                    amt = int(raw) if str(raw).strip().isdigit() else None
+                elif amt is not None and not isinstance(amt, int):
                     amt = int(amt) if str(amt).strip().isdigit() else None
             except Exception:
                 log.debug("get_lot_fields failed for %s", lid, exc_info=True)

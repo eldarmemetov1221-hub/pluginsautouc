@@ -75,6 +75,30 @@ def test_stock_report_unknown_amount_listed():
     assert "660 UC" in txt.split("Не удалось прочитать наличие")[1]
 
 
+def test_get_lot_amounts_skips_inactive():
+    from pubg_uc_spark.funpay import orders as fo
+
+    class LF:
+        def __init__(self, active, amount):
+            self.active = active
+            self.amount = amount
+            self.fields = {}
+
+    data = {60: LF(True, 5), 600: LF(False, 1), 660: LF(False, 1)}
+
+    class Acc:
+        def get_lot_fields(self, lid):
+            return data[int(lid)]
+
+    class Card:
+        account = Acc()
+
+    got = fo.get_lot_amounts(Card(), ["60", "600", "660"])
+    assert got["60"] == 5      # active -> real amount
+    assert got["600"] == 0     # inactive -> 0 (not counted)
+    assert got["660"] == 0
+
+
 def test_stock_summary_parses_by_denomination(tmp_path):
     from pubg_uc_spark.spark.client import SparkChecker
     from pubg_uc_spark.spark import client as cli
