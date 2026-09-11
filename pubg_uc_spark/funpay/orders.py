@@ -43,6 +43,37 @@ def _matches(lot: LotConfig, description: str) -> bool:
     return "uc" in desc and "id" in desc
 
 
+def get_lot_amounts(cardinal, lot_ids) -> dict:
+    """Return {lot_id: amount} = FunPay "Наличие" for each offer id.
+
+    Reads the seller's own lot fields via FunPayAPI (account.get_lot_fields).
+    A lot whose amount can't be read (error / unlimited / no field) maps to None.
+    Fully duck-typed and defensive: one failing lot never breaks the rest.
+    """
+    out: dict = {}
+    account = getattr(cardinal, "account", None)
+    getter = getattr(account, "get_lot_fields", None)
+    for lid in lot_ids:
+        amt = None
+        if callable(getter):
+            try:
+                key = int(lid) if str(lid).isdigit() else lid
+                lf = getter(key)
+                amt = getattr(lf, "amount", None)
+                if amt is None:
+                    fields = getattr(lf, "fields", None)
+                    if isinstance(fields, dict):
+                        raw = fields.get("amount")
+                        amt = int(raw) if str(raw).strip().isdigit() else None
+                elif not isinstance(amt, int):
+                    amt = int(amt) if str(amt).strip().isdigit() else None
+            except Exception:
+                log.debug("get_lot_fields failed for %s", lid, exc_info=True)
+                amt = None
+        out[str(lid)] = amt
+    return out
+
+
 def match_lot(cfg: Config, order_shortcut) -> Optional[LotConfig]:
     """Return the configured lot whose description keywords match, else None."""
     description = getattr(order_shortcut, "description", "") or ""

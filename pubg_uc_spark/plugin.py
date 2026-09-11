@@ -346,7 +346,11 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 stock = plugin.checker.stock_summary()
             except Exception as exc:
                 return f"Не удалось получить сток Spark: {exc}"
-            return admin.stock_report(stock)
+            try:
+                amounts = funpay_orders.get_lot_amounts(cardinal, list(cfg.lots.keys()))
+            except Exception:
+                amounts = {}
+            return admin.stock_report(stock, amounts)
 
         @bot.message_handler(commands=["uc_stock"])
         def _stock(message):  # pragma: no cover - requires telebot

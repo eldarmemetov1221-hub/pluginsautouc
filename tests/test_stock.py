@@ -30,50 +30,38 @@ def _lots():
     return {k: LotConfig(k, p, uc, picks) for k, (p, uc, picks) in raw.items()}
 
 
-class _FakeRepo:
-    """Returns a delivered-orders set matching the user's real sales counts."""
-    def __init__(self, counts):
-        # counts: {lot_key: number_of_orders}
-        self._orders = []
-        for k, n in counts.items():
-            self._orders += [{"lot_id": k, "quantity": 1}] * n
-
-    def delivered_orders(self, days=None):
-        return list(self._orders)
+# FunPay "Наличие" (listed availability) per lot, from the real screenshots.
+_AMOUNTS = {"60l": 5, "120l": 6, "180l": 3, "300l": 3, "325l": 2, "360l": 5,
+            "445l": 4, "600l": 3, "660l": 3, "720l": 3, "900l": 2, "1045l": 2,
+            "1320l": 3, "1500l": 3}
 
 
-def test_stock_report_demand_vs_stock():
+def test_stock_report_availability_vs_stock():
     c = Config()
     c.lots = _lots()
-    c.stock_low_threshold = 10
-    c.stock_demand_days = 30
-    # sales counts per lot (from the real screenshots)
-    counts = {"60l": 5, "120l": 6, "180l": 3, "300l": 3, "325l": 2, "360l": 5,
-              "445l": 4, "600l": 3, "660l": 3, "720l": 3, "900l": 2, "1045l": 2,
-              "1320l": 3, "1500l": 3}
-    admin = AdminService(c, repo=_FakeRepo(counts), order_service=None)
-    stock = {"60": 42, "325": 17, "660": 5, "1800": 0, "3850": 0, "8100": 0}
-    txt = admin.stock_report(stock)
-
-    # demand: 60->61, 325->16, 660->25 ; stock 42/17/5 -> restock 19/0/20
-    assert "докупить 20" in txt          # 660: 25-5
-    assert "докупить 19" in txt          # 60: 61-42
-    assert "660×20" in txt and "60×19" in txt
-    assert "325" in txt                  # shown, but no restock (17>=16)
-    # 325 has no restock line
-    assert "325×" not in txt
-    # no "поштучно" wording anymore
-    assert "оштучно" not in txt
-
-
-def test_stock_report_no_repo_lists_stock():
-    c = Config()
-    c.lots = _lots()
-    c.stock_low_threshold = 10
     admin = AdminService(c, repo=None, order_service=None)
-    txt = admin.stock_report({"60": 42, "325": 17, "660": 5})
-    assert "660 UC" in txt and "в наличии 5" in txt
-    assert "оштучно" not in txt
+    stock = {"60": 42, "325": 17, "660": 5, "1800": 0, "3850": 0, "8100": 0}
+    txt = admin.stock_report(stock, _AMOUNTS)
+
+    # need: 60->61, 325->16, 660->25 ; stock 42/17/5 -> restock 19/0/20
+    assert "нужно 25, в Spark 5 → не хватает 20" in txt     # 660
+    assert "нужно 61, в Spark 42 → не хватает 19" in txt    # 60
+    assert "нужно 16, в Spark 17" in txt                    # 325 ok
+    assert "660×20" in txt and "60×19" in txt
+    assert "325×" not in txt                                # no 325 restock
+    assert "оштучно" not in txt                             # feature removed
+
+
+def test_stock_report_unknown_amount_listed():
+    c = Config()
+    c.lots = _lots()
+    admin = AdminService(c, repo=None, order_service=None)
+    # 660l has no amount (None) -> reported as unreadable, excluded from need
+    amounts = dict(_AMOUNTS)
+    amounts["660l"] = None
+    txt = admin.stock_report({"60": 42, "325": 17, "660": 5}, amounts)
+    assert "Не удалось прочитать наличие" in txt
+    assert "660 UC" in txt.split("Не удалось прочитать наличие")[1]
 
 
 def test_stock_summary_parses_by_denomination(tmp_path):

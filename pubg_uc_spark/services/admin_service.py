@@ -42,75 +42,57 @@ class AdminService:
             "/uc_stock — остатки стока Spark и каких пачек не хватает"
         )
 
-    def _pack_demand(self) -> dict:
-        """Packs consumed by delivered orders over the demand window
-        (STOCK_DEMAND_DAYS): {denom: total_count}. Empty if no repo/orders."""
-        demand: dict = {}
-        if self.repo is None:
-            return demand
-        days = int(getattr(self.cfg, "stock_demand_days", 30)) or None
-        try:
-            orders = self.repo.delivered_orders(days)
-        except Exception:
-            return demand
-        for o in orders:
-            lot = self.cfg.lot(o.get("lot_id"))
-            if not lot:
-                continue
-            for denom, cnt in lot.picks_for(o.get("quantity") or 1).items():
-                demand[str(denom)] = demand.get(str(denom), 0) + cnt
-        return demand
+    def stock_report(self, stock: dict, lot_amounts: dict = None) -> str:
+        """Compare Spark stock to what the active lots' FunPay availability needs.
 
-    def stock_report(self, stock: dict) -> str:
-        """Spark stock vs demand: what's in stock and how much to restock.
+        ``stock``       = {denom: available_in_spark}
+        ``lot_amounts`` = {lot_id: наличие} (units the seller listed on FunPay);
+                          a lot with None is counted as "наличие неизвестно".
 
-        ``stock`` = {denom: available_count}.
+        For every active lot: needed packs = наличие × its pack combo. Summed per
+        pack and compared to Spark stock -> how many of each to restock.
         """
-        low = int(getattr(self.cfg, "stock_low_threshold", 10))
-        days = int(getattr(self.cfg, "stock_demand_days", 30))
+        lot_amounts = lot_amounts or {}
 
-        # Packs actually used by active lots.
-        used = []
-        seen = set()
-        for d in SPARK_BASE_DENOMINATIONS:
-            for lot in self.cfg.lots.values():
-                if d in lot.base_picks() and d not in seen:
-                    used.append(d)
-                    seen.add(d)
-                    break
+        need: dict = {}          # denom -> packs required to cover listed наличие
+        unknown = []             # lots whose наличие couldn't be read
+        for lot in self.cfg.lots.values():
+            amt = lot_amounts.get(str(lot.lot_id))
+            if amt is None:
+                unknown.append(lot.product)
+                continue
+            for denom, cnt in lot.base_picks().items():
+                need[str(denom)] = need.get(str(denom), 0) + cnt * int(amt)
 
-        demand = self._pack_demand()
+        # Packs used by active lots (stable order by base denomination).
+        used = [d for d in SPARK_BASE_DENOMINATIONS
+                if any(d in lot.base_picks() for lot in self.cfg.lots.values())]
 
-        rows = []           # (denom, have, need, restock)
+        rows = []                # (denom, have, req, restock)
         for d in used:
             have = int(stock.get(d, 0))
-            need = int(demand.get(d, 0))
-            restock = max(0, need - have)
-            rows.append((d, have, need, restock))
-        # Most urgent first: biggest restock, then lowest stock.
-        rows.sort(key=lambda r: (-r[3], r[1]))
+            req = int(need.get(d, 0))
+            rows.append((d, have, req, max(0, req - have)))
+        rows.sort(key=lambda r: (-r[3], r[1]))   # biggest shortage first
 
-        header = "📦 Сток Spark"
-        period = ("за всё время" if days == 0 else f"спрос за {days} дн.")
-        out = [header, period, ""]
-
-        has_demand = any(n for _, _, n, _ in rows)
+        out = ["📦 Сток Spark vs наличие лотов", ""]
         to_buy = []
-        for d, have, need, restock in rows:
+        for d, have, req, restock in rows:
             if restock > 0:
-                icon = "🟥" if have == 0 or have <= low else "🟠"
-                out.append(f"{icon} {d} UC — в наличии {have}, продано {need} → докупить {restock}")
+                out.append(f"🟥 {d} UC — нужно {req}, в Spark {have} → не хватает {restock}")
                 to_buy.append(f"{d}×{restock}")
             else:
-                low_mark = " ⚠️ мало" if have <= low else ""
-                tail = f", продано {need}" if has_demand else ""
-                out.append(f"🟢 {d} UC — в наличии {have}{tail}{low_mark}")
+                out.append(f"🟢 {d} UC — нужно {req}, в Spark {have}")
 
         out.append("")
         if to_buy:
             out.append("🛒 Докупить: " + ", ".join(to_buy))
         else:
-            out.append("✅ Стока хватает под текущий спрос.")
+            out.append("✅ Стока хватает под всё выставленное наличие.")
+
+        if unknown:
+            out.append("")
+            out.append("⚠️ Не удалось прочитать наличие: " + ", ".join(unknown))
         return "\n".join(out)
 
     def finance(self) -> str:
