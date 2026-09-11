@@ -52,6 +52,17 @@ def test_stock_report_availability_vs_stock():
     assert "оштучно" not in txt                             # feature removed
 
 
+def test_stock_report_total_cost_of_stock():
+    c = Config()
+    c.lots = _lots()
+    c.pack_costs = {"60": 45.0, "325": 210.0, "660": 400.0}
+    admin = AdminService(c, repo=None, order_service=None)
+    stock = {"60": 42, "325": 17, "660": 5}
+    txt = admin.stock_report(stock, _AMOUNTS)
+    # 42*45 + 17*210 + 5*400 = 1890 + 3570 + 2000 = 7460
+    assert "Себестоимость всего стока: 7460.00 ₽" in txt
+
+
 def test_stock_report_unknown_amount_listed():
     c = Config()
     c.lots = _lots()

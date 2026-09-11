@@ -84,6 +84,13 @@ class AdminService:
             else:
                 out.append(f"🟢 {d} UC — нужно {req}, в Spark {have}")
 
+        # Total cost value of everything currently in Spark stock.
+        stock_value = 0.0
+        for d in SPARK_BASE_DENOMINATIONS:
+            stock_value += int(stock.get(d, 0)) * float(self.cfg.pack_costs.get(d, 0) or 0)
+        out.append("")
+        out.append(f"💵 Себестоимость всего стока: {stock_value:.2f} ₽")
+
         out.append("")
         if to_buy:
             out.append("🛒 Докупить: " + ", ".join(to_buy))
