@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS orders (
     quantity          INTEGER DEFAULT 1,
     status            TEXT NOT NULL,
     chat_id           TEXT,
+    price             REAL DEFAULT 0,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -91,7 +92,17 @@ class Database:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created (idempotent)."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(orders)")}
+        if "price" not in cols:
+            # Older DBs have no price; add it (existing rows -> 0, i.e. counted
+            # as "no price" in finance stats until re-captured on new orders).
+            self._conn.execute("ALTER TABLE orders ADD COLUMN price REAL DEFAULT 0")
+            log.info("Migrated: added orders.price column")
 
     @property
     def lock(self) -> threading.RLock:

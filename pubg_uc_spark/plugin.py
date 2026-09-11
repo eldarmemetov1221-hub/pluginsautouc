@@ -16,13 +16,10 @@ from .database.repository import Repository
 from .errors import SparkCriticalError
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
-from .funpay.reconcile import Reconciler
 from .services.admin_service import AdminService
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
-from .services.watchdog_control import WatchdogControl
 from .spark.client import SparkChecker
-from .utils.heartbeat import Heartbeat
 from .utils.logger import get_logger
 
 log = get_logger("plugin")
@@ -43,12 +40,7 @@ class Plugin:
             self.cfg, self._perform_check, self._on_result, async_mode=async_mode
         )
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
-        self.reconciler = Reconciler(cardinal, self.cfg, self.repo, self.orders)
-        self.heartbeat = Heartbeat(self.cfg.heartbeat_file)
-        self.watchdog = WatchdogControl(self.cfg)
-        self.admin = AdminService(
-            self.cfg, self.repo, self.orders, watchdog=self.watchdog, heartbeat=self.heartbeat
-        )
+        self.admin = AdminService(self.cfg, self.repo, self.orders)
 
     # ------------------------------------------------------------------ #
     def _on_result(self, code_id, result, error, attempts):
@@ -69,8 +61,6 @@ class Plugin:
     # ------------------------------------------------------------------ #
     def start(self) -> None:
         self.retry.start()
-        self.heartbeat.beat(force=True)
-        self.watchdog.ensure_file()
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, lots=%s, resumed=%s)",
@@ -78,39 +68,6 @@ class Plugin:
             list(self.cfg.lots.keys()),
             resumed,
         )
-
-    def run_backfill(self, force: bool = False, background: bool = False) -> dict:
-        """Recover orders missed while Cardinal was offline. Runs after the
-        account is logged in (post_init) and on demand via /uc_backfill.
-
-        FunPayCardinal does not replay orders that arrived during downtime, so
-        without this a restart (manual or by a watchdog) leaves those orders
-        unfulfilled. ``force=True`` (the admin command) bypasses BACKFILL_MODE
-        and the watchdog trigger.
-
-        ``background=True`` runs it on a daemon thread and returns immediately -
-        used at startup so scanning many open sales (each with a throttled
-        FunPay history read) never blocks Cardinal from starting its event
-        runner. Idempotency guards make concurrent live events safe.
-        """
-        if background:
-            import threading
-
-            threading.Thread(
-                target=self._run_backfill_safe,
-                args=(force,),
-                name="pubg-uc-spark-backfill",
-                daemon=True,
-            ).start()
-            return {"scheduled": True}
-        return self._run_backfill_safe(force)
-
-    def _run_backfill_safe(self, force: bool) -> dict:
-        try:
-            return self.reconciler.run(force=force)
-        except Exception:  # pragma: no cover - defensive
-            log.exception("Backfill failed")
-            return {"error": True}
 
     def stop(self) -> None:
         self.retry.stop()
@@ -120,8 +77,6 @@ class Plugin:
     # Event handlers
     # ------------------------------------------------------------------ #
     def on_new_order(self, order_shortcut) -> None:
-        # Any event proves the FunPay runner is alive and polling.
-        self.heartbeat.beat()
         funpay_order_id = str(getattr(order_shortcut, "id", "") or "")
         if not funpay_order_id:
             return
@@ -144,8 +99,6 @@ class Plugin:
         self.orders.handle_new_order(record)
 
     def on_new_message(self, message) -> None:
-        # Any event proves the FunPay runner is alive and polling.
-        self.heartbeat.beat()
         message_id = str(getattr(message, "id", "") or "")
         author_id = str(getattr(message, "author_id", "") or "")
         chat_id = str(getattr(message, "chat_id", "") or "")
@@ -179,18 +132,6 @@ def init(cardinal, *args) -> Plugin:
     return _plugin
 
 
-def post_init(cardinal, *args) -> None:
-    """Run once after FPC finishes account login (BIND_TO_POST_INIT), before the
-    event runner starts - so backfill completes with no concurrency with live
-    events. The account is logged in here (unlike PRE_INIT), so get_sales works.
-    """
-    if _plugin is None:
-        init(cardinal)
-    # Background so a large scan (many throttled FunPay history reads) never
-    # blocks Cardinal from starting its event runner.
-    _plugin.run_backfill(background=True)
-
-
 def on_new_order(cardinal, event, *args) -> None:
     if _plugin is None:
         init(cardinal)
@@ -221,10 +162,8 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         return cfg.is_admin(getattr(getattr(message, "from_user", None), "id", None))
 
     def reply(message, text):
-        # parse_mode="" forces plain text. NOTE: parse_mode=None does NOT - in
-        # telebot None means "use the bot's default", and FPC sets HTML, which
-        # rejects any '<...>' in our replies (e.g. "stall <минут>") with a 400
-        # "Unsupported start tag". An empty string disables parsing entirely.
+        # parse_mode="" forces plain text (None would use the bot's HTML default,
+        # which rejects any '<...>' in usage hints with a 400 error).
         try:
             bot.reply_to(message, text, parse_mode="")
         except Exception:
@@ -307,31 +246,11 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             a = _args(message)
             reply(message, admin.skip(a[0]) if a else "Usage: /uc_skip <funpay_order_id>")
 
-        @bot.message_handler(commands=["uc_watchdog"])
-        def _watchdog(message):  # pragma: no cover - requires telebot
+        @bot.message_handler(commands=["uc_finance"])
+        def _finance(message):  # pragma: no cover - requires telebot
             if not guard(message):
                 return
-            reply(message, admin.watchdog_cmd(*_args(message)))
-
-        @bot.message_handler(commands=["uc_backfill"])
-        def _backfill(message):  # pragma: no cover - requires telebot
-            if not guard(message):
-                return
-            reply(message, "♻️ Запускаю восстановление пропущенных заказов...")
-            s = plugin.run_backfill(force=True)
-            reply(
-                message,
-                "Готово. Просмотрено продаж: {scanned}, отслеживаемых лотов: {tracked}, "
-                "новых зарегистрировано: {registered}, из них UID найден: {uid_recovered}, "
-                "уже было в базе: {already_known}, пропущено как старые: {skipped_old}.".format(
-                    scanned=s.get("scanned", 0),
-                    tracked=s.get("tracked", 0),
-                    registered=s.get("registered", 0),
-                    uid_recovered=s.get("uid_recovered", 0),
-                    already_known=s.get("already_known", 0),
-                    skipped_old=s.get("skipped_old", 0),
-                ),
-            )
+            reply(message, admin.finance())
 
         log.info("Admin commands registered")
     except Exception:

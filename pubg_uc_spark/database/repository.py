@@ -69,8 +69,8 @@ class Repository:
             self.db.conn.execute(
                 """INSERT OR IGNORE INTO orders
                    (funpay_order_id, lot_id, buyer_id, buyer_username, quantity,
-                    status, chat_id, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    status, chat_id, price, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     order.funpay_order_id,
                     order.lot_id,
@@ -79,6 +79,7 @@ class Repository:
                     order.quantity,
                     order.status or OrderStatus.NEW.value,
                     order.chat_id,
+                    float(order.price or 0),
                     now,
                     now,
                 ),
@@ -310,6 +311,16 @@ class Repository:
             params = (f"{_now()[:10]}%",)
         sql += " GROUP BY status"
         return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
+
+    def finance_orders(self, today_only: bool = False) -> List[dict]:
+        """Delivered (VALID) orders for finance stats: lot_id, quantity, price."""
+        sql = ("SELECT lot_id, quantity, price FROM orders "
+               "WHERE status = ?")
+        params: tuple = (OrderStatus.VALID.value,)
+        if today_only:
+            sql += " AND created_at LIKE ?"
+            params = (OrderStatus.VALID.value, f"{_now()[:10]}%")
+        return [dict(r) for r in self.db.query_all(sql, params)]
 
     def get_logs_for_order(self, order_id: int) -> List[dict]:
         rows = self.db.query_all(

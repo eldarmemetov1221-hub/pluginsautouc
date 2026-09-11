@@ -49,8 +49,6 @@ class FunPayMessenger:
             return
         for admin_id in self.cfg.admin_ids:
             try:
-                # parse_mode="" forces plain text (None would fall back to the
-                # bot's HTML default, which rejects any '<...>' with a 400).
-                bot.send_message(admin_id, text, parse_mode="")
+                bot.send_message(admin_id, text)
             except Exception:
                 log.exception("Failed to notify admin %s", admin_id)

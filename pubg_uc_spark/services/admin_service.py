@@ -14,12 +14,10 @@ log = get_logger("admin")
 
 
 class AdminService:
-    def __init__(self, config, repo, order_service, watchdog=None, heartbeat=None):
+    def __init__(self, config, repo, order_service):
         self.cfg = config
         self.repo = repo
         self.orders = order_service
-        self.watchdog = watchdog      # WatchdogControl or None
-        self.heartbeat = heartbeat    # Heartbeat or None
 
     # ---- help / stats ---- #
     def help_text(self) -> str:
@@ -36,11 +34,48 @@ class AdminService:
             "/uc_cancel <code_id> — отменить автоповторы (FAILED)\n"
             "/uc_setstatus <order_id> <СТАТУС> — сменить статус заказа\n"
             "/uc_resend <order_id> — попросить покупателя прислать UID\n"
-            "/uc_skip <order_id> — не начислять (если выдали вручную)\n"
-            "/uc_backfill — подтянуть заказы, пропущенные во время простоя "
-            "(зарегистрировать и, если покупатель уже прислал UID, начислить)\n"
-            "/uc_watchdog [on|off|stall N] — статус/управление сторожем "
-            "(автоперезапуск при зависании)"
+            "/uc_skip <order_id> — не начислять (если выдали вручную)\n\n"
+            "💰 Финансы:\n"
+            "/uc_finance — выручка, комиссия, себестоимость, чистая прибыль"
+        )
+
+    def finance(self) -> str:
+        """Revenue / commission / cost / net profit over delivered orders."""
+        def calc(rows):
+            revenue = cost = 0.0
+            priced = skipped = 0
+            for r in rows:
+                p = float(r.get("price") or 0)
+                if p <= 0:
+                    skipped += 1          # order captured before price tracking
+                    continue
+                priced += 1
+                revenue += p
+                cost += self.cfg.order_cost(r.get("lot_id"), r.get("quantity") or 1)
+            commission = revenue * (self.cfg.commission_percent / 100.0)
+            net = revenue - commission - cost
+            return priced, skipped, revenue, commission, cost, net
+
+        def block(t) -> str:
+            priced, skipped, rev, com, cost, net = t
+            head = f"  Заказов: {priced}" + (f" (+{skipped} без цены)" if skipped else "")
+            return (
+                f"{head}\n"
+                f"  Выручка: {rev:.2f} ₽\n"
+                f"  Комиссия {self.cfg.commission_percent:g}%: −{com:.2f} ₽\n"
+                f"  Себестоимость: −{cost:.2f} ₽\n"
+                f"  Чистая прибыль: {net:.2f} ₽"
+            )
+
+        all_time = calc(self.repo.finance_orders())
+        today = calc(self.repo.finance_orders(today_only=True))
+        warn = ""
+        if not self.cfg.pack_costs:
+            warn = "\n\n⚠️ PACK_COSTS не заданы — себестоимость считается как 0."
+        return (
+            "💰 Финансы PUBG UC (выполненные заказы)\n\n"
+            f"За всё время:\n{block(all_time)}\n\n"
+            f"Сегодня:\n{block(today)}" + warn
         )
 
     def stats(self) -> str:
@@ -157,48 +192,6 @@ class AdminService:
                           order_id=order.id)
         return (f"Order #{oid} marked CANCELLED - the plugin will NOT auto-redeem it "
                 f"(use this after manual fulfilment).")
-
-    def watchdog_cmd(self, *args) -> str:
-        """Control the external watchdog (tools/watchdog.sh) at runtime:
-
-            /uc_watchdog                 - show status
-            /uc_watchdog on | off        - enable / disable auto-restart
-            /uc_watchdog stall N         - set the silence threshold (minutes)
-        """
-        if self.watchdog is None:
-            return "Watchdog control недоступен (не настроен)."
-
-        parts = [str(a).strip().lower() for a in args if str(a).strip()]
-        sub = parts[0] if parts else "status"
-
-        if sub in ("on", "вкл", "enable"):
-            ok = self.watchdog.set_enabled(True)
-            return "✅ Сторож включён." if ok else "Не удалось записать настройку."
-        if sub in ("off", "выкл", "disable"):
-            ok = self.watchdog.set_enabled(False)
-            return ("⛔️ Сторож выключен — автоперезапуск не будет срабатывать, "
-                    "пока не включишь обратно.") if ok else "Не удалось записать настройку."
-        if sub in ("stall", "тишина", "time"):
-            if len(parts) < 2 or not parts[1].isdigit():
-                return "Использование: /uc_watchdog stall 15  (число минут)"
-            ok = self.watchdog.set_stall_minutes(int(parts[1]))
-            return (f"✅ Порог тишины: {int(parts[1])} мин." if ok
-                    else "Не удалось записать настройку.")
-
-        # status (default)
-        data = self.watchdog.read()
-        age = self.heartbeat.age() if self.heartbeat is not None else None
-        if age is None:
-            age_txt = "нет данных"
-        else:
-            age_txt = f"{int(age)} сек назад"
-        return (
-            "🐕 Сторож (watchdog)\n"
-            f"  Состояние: {'включён' if data['enabled'] else 'ВЫКЛЮЧЕН'}\n"
-            f"  Порог тишины: {data['stall_minutes']} мин\n"
-            f"  Последнее событие FunPay: {age_txt}\n\n"
-            "Команды: /uc_watchdog on | off | stall N (минут)"
-        )
 
     def resend_ask(self, funpay_order_id: str) -> str:
         """Manually ask the buyer for their UID (the bot never does this auto)."""

@@ -109,6 +109,7 @@ class OrderRecord:
     quantity: int = 1
     status: str = OrderStatus.NEW.value
     chat_id: str = ""
+    price: float = 0.0
     created_at: str = ""
     updated_at: str = ""
 

@@ -28,13 +28,19 @@ def _matches(lot: LotConfig, description: str) -> bool:
     desc = (description or "").lower()
     if not desc:
         return False
+    # This plugin ONLY fulfils "Пополнение по ID" lots. Never match a code /
+    # gift-code lot ("Пополнение кодом"), even if the UC amount and "uc" line up
+    # - otherwise a code order whose buyer sends a UID would be wrongly redeemed.
+    if any(w in desc for w in ("код", "code", "промокод")):
+        return False
     if lot.keywords:
         return all(str(k).lower() in desc for k in lot.keywords)
-    # Default: the advertised UC as a WHOLE number (so "60" != "660") + "uc".
+    # Default: the advertised UC as a WHOLE number (so "60" != "660") + "uc",
+    # and the description must mark it as an ID top-up ("... по ID").
     uc = str(lot.uc)
     if uc and not re.search(rf"(?<!\d){re.escape(uc)}(?!\d)", desc):
         return False
-    return "uc" in desc
+    return "uc" in desc and "id" in desc
 
 
 def match_lot(cfg: Config, order_shortcut) -> Optional[LotConfig]:
@@ -59,6 +65,17 @@ def build_order_record(order_shortcut, lot: LotConfig) -> OrderRecord:
     except (TypeError, ValueError):
         amount = 1
 
+    # Paid price (RUB) for finance stats. FunPay's OrderShortcut carries the
+    # order total; be tolerant of it being a number or a string like "123,45 ₽".
+    raw_price = getattr(order_shortcut, "price", None)
+    price = 0.0
+    if raw_price is not None:
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            m = re.search(r"[0-9]+(?:[.,][0-9]+)?", str(raw_price))
+            price = float(m.group(0).replace(",", ".")) if m else 0.0
+
     return OrderRecord(
         funpay_order_id=str(g("id")),
         lot_id=lot.lot_id,
@@ -66,4 +83,5 @@ def build_order_record(order_shortcut, lot: LotConfig) -> OrderRecord:
         buyer_username=str(g("buyer_username")),
         quantity=amount,
         chat_id=str(g("chat_id")),
+        price=price,
     )

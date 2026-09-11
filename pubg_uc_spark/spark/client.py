@@ -117,7 +117,24 @@ class SparkChecker:
                     timeout=self.cfg.spark_timeout + self.cfg.spark_job_wait,
                 )
             except Exception as exc:
-                raise SparkTemporaryError(f"Spark job poll failed: {exc}") from exc
+                # The job is ALREADY created on Spark's side; the redeem may well
+                # have completed. A dropped/timed-out poll must NOT be reported as
+                # a failure - re-poll the SAME job_id (an idempotent GET: no new
+                # redeem, no double top-up) until the overall deadline. Only give
+                # up if we keep failing past spark_max_wait.
+                if time.monotonic() >= deadline:
+                    raise SparkTemporaryError(f"Spark job poll failed: {exc}") from exc
+                log.warning("[Spark] poll transport error, re-polling job %s: %s", job_id, exc)
+                time.sleep(3)
+                continue
+            # 429 / 5xx while polling: transient too - keep re-polling the same
+            # job until the deadline instead of aborting (again, no new redeem).
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if time.monotonic() >= deadline:
+                    raise SparkTemporaryError(f"Spark HTTP {resp.status_code}")
+                log.warning("[Spark] poll HTTP %s, re-polling job %s", resp.status_code, job_id)
+                time.sleep(3)
+                continue
             self._raise_for_transport(resp)
             job = self._json(resp)
             status = str(job.get("status") or job.get("state") or "").lower()

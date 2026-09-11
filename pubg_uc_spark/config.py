@@ -95,19 +95,25 @@ def _get_admin_ids() -> List[int]:
 #: Base UC denominations the Spark bot can redeem from stock.
 SPARK_BASE_DENOMINATIONS = ("60", "325", "660", "1800", "3850", "8100")
 
-#: Valid values for BACKFILL_MODE.
-BACKFILL_MODES = ("always", "watchdog", "off")
 
-
-def _resolve_backfill_mode() -> str:
-    """Resolve BACKFILL_MODE (always|watchdog|off), honouring the legacy
-    BACKFILL_ON_START=0 flag as ``off``."""
-    m = os.environ.get("BACKFILL_MODE", "").strip().lower()
-    if m in BACKFILL_MODES:
-        return m
-    if not _get_bool("BACKFILL_ON_START", True):
-        return "off"
-    return "always"
+def _default_pack_costs() -> Dict[str, float]:
+    """Cost (RUB) of each Spark base pack, for profit stats. From the
+    ``PACK_COSTS`` env var (JSON), e.g. {"60": 45, "325": 210, "660": 400}."""
+    raw = os.environ.get("PACK_COSTS", "").strip()
+    if not raw:
+        pf = os.environ.get("PACK_COSTS_FILE", "").strip()
+        if pf and os.path.isfile(pf):
+            try:
+                with open(pf, encoding="utf-8") as fh:
+                    raw = fh.read().strip()
+            except OSError:
+                raw = ""
+    if not raw:
+        return {}
+    try:
+        return {str(k): float(v) for k, v in json.loads(raw).items()}
+    except (ValueError, AttributeError, TypeError):
+        return {}
 
 
 @dataclass
@@ -329,73 +335,12 @@ class Config:
     retry_delay: float = field(default_factory=lambda: _get_float("RETRY_DELAY", 5.0))
     retry_backoff: float = field(default_factory=lambda: _get_float("RETRY_BACKOFF", 2.0))
 
-    # Startup reconciliation / backfill (section 19-20).
-    # FunPayCardinal does NOT replay orders that arrived while it was offline
-    # (on restart it treats existing sales as a baseline and only fires
-    # NEW_ORDER for sales placed afterwards). So an order paid during a network
-    # outage is never seen and its buyer's UID is ignored. When it runs, on
-    # startup (and always via /uc_backfill) the plugin pulls the seller's
-    # currently open sales, registers any tracked ones missing from our DB, and
-    # - if BACKFILL_READ_HISTORY - reads each chat's history to pick up a UID
-    # the buyer already sent, so the order self-heals without a new message.
-    #
-    # BACKFILL_MODE controls WHEN the automatic startup scan runs:
-    #   always   - every startup (default);
-    #   watchdog - only when a watchdog-created trigger file is present, so a
-    #              manual restart (you are present, handling things yourself)
-    #              does NOT scan, but an unattended watchdog restart does;
-    #   off      - never on startup (only /uc_backfill triggers it).
-    # (Legacy: BACKFILL_ON_START=0 is honoured as BACKFILL_MODE=off.)
-    backfill_mode: str = field(default_factory=_resolve_backfill_mode)
-    # Trigger file for watchdog mode. The watchdog must create this file right
-    # before (re)starting Cardinal; the plugin consumes (deletes) it on startup.
-    backfill_trigger_file: str = field(
-        default_factory=lambda: _get(
-            "BACKFILL_TRIGGER_FILE",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".backfill_request"),
-        )
+    # Finance stats (/uc_finance): FunPay commission % taken off the sale price,
+    # and the RUB cost of each Spark base pack (себестоимость) for profit calc.
+    commission_percent: float = field(
+        default_factory=lambda: _get_float("COMMISSION_PERCENT", 3.0)
     )
-    backfill_read_history: bool = field(
-        default_factory=lambda: _get_bool("BACKFILL_READ_HISTORY", True)
-    )
-
-    # Liveness heartbeat file. The plugin bumps it at startup and on every
-    # FunPay runner event, so a watchdog can tell a stalled runner (process
-    # alive but no events - e.g. poll thread stuck after a network flap) from a
-    # healthy one. Empty disables writing. Default: next to this .env.
-    heartbeat_file: str = field(
-        default_factory=lambda: _get(
-            "HEARTBEAT_FILE",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".heartbeat"),
-        )
-    )
-
-    # Watchdog control file (managed by /uc_watchdog, read by tools/watchdog.sh)
-    # and the default silence threshold. Lets the admin enable/disable the
-    # watchdog and tune the stall window at runtime, so quiet periods with no
-    # customers don't trigger needless restarts.
-    watchdog_control_file: str = field(
-        default_factory=lambda: _get(
-            "WATCHDOG_CONTROL_FILE",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".watchdog"),
-        )
-    )
-    watchdog_stall_minutes: int = field(
-        default_factory=lambda: max(1, _get_int("WATCHDOG_STALL_MINUTES", 15))
-    )
-    # Only recover open sales created within this many minutes (the outage
-    # window). 0 = no limit (scan all open sales). Keeps backfill from re-reading
-    # history for long-standing unconfirmed orders. Fail-open: a sale whose date
-    # can't be determined reliably is NOT skipped.
-    backfill_max_age_minutes: int = field(
-        default_factory=lambda: max(0, _get_int("BACKFILL_MAX_AGE_MINUTES", 30))
-    )
-    # How many sales pages to scan (each page ~100 sales). Bounds API load.
-    backfill_max_pages: int = field(default_factory=lambda: max(1, _get_int("BACKFILL_MAX_PAGES", 3)))
-    # How many of the most recent chat messages to scan per order for a UID.
-    backfill_history_limit: int = field(
-        default_factory=lambda: max(1, _get_int("BACKFILL_HISTORY_LIMIT", 50))
-    )
+    pack_costs: Dict[str, float] = field(default_factory=_default_pack_costs)
 
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the
@@ -428,6 +373,17 @@ class Config:
 
     def lot(self, lot_id) -> LotConfig | None:
         return self.lots.get(str(lot_id))
+
+    def order_cost(self, lot_id, quantity: int = 1) -> float:
+        """Total себестоимость of an order = sum of consumed Spark packs × their
+        cost. Returns 0 if the lot is unknown or pack costs aren't configured."""
+        lot = self.lot(lot_id)
+        if lot is None:
+            return 0.0
+        total = 0.0
+        for denom, count in lot.picks_for(quantity).items():
+            total += self.pack_costs.get(str(denom), 0.0) * count
+        return total
 
     def is_tracked_lot(self, lot_id) -> bool:
         return str(lot_id) in self.lots
