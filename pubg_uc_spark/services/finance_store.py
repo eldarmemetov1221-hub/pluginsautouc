@@ -47,8 +47,14 @@ class FinanceStore:
                 if n is not None:
                     costs[str(k)] = n
             self.cfg.pack_costs = costs
-        log.info("Finance settings loaded (commission=%s%%, packs=%s)",
-                 self.cfg.commission_percent, self.cfg.pack_costs)
+        # Only override the env default when the key is actually present as a
+        # bool (older finance.json files won't have it -> keep cfg's default).
+        ad = data.get("auto_delivery")
+        if isinstance(ad, bool):
+            self.cfg.auto_delivery = ad
+        log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s)",
+                 self.cfg.commission_percent, self.cfg.pack_costs,
+                 getattr(self.cfg, "auto_delivery", True))
 
     # ------------------------------------------------------------------ #
     def set_pack_cost(self, denom: str, value: float) -> bool:
@@ -62,11 +68,17 @@ class FinanceStore:
         self.cfg.commission_percent = float(pct)
         return self._write(self._current())
 
+    def set_auto_delivery(self, enabled: bool) -> bool:
+        """Flip the master auto-redeem switch and persist it."""
+        self.cfg.auto_delivery = bool(enabled)
+        return self._write(self._current())
+
     # ------------------------------------------------------------------ #
     def _current(self) -> Dict:
         return {
             "commission_percent": self.cfg.commission_percent,
             "pack_costs": dict(self.cfg.pack_costs),
+            "auto_delivery": bool(getattr(self.cfg, "auto_delivery", True)),
         }
 
     def _read(self) -> Optional[Dict]:

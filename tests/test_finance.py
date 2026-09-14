@@ -77,3 +77,18 @@ def test_finance_store_seeds_when_missing(tmp_path):
     assert not os.path.isfile(c.finance_config_file)
     FinanceStore(c).load_into_cfg()
     assert os.path.isfile(c.finance_config_file)   # created from current cfg
+
+
+def test_auto_delivery_toggle_persists(tmp_path):
+    c = _cfg(tmp_path)
+    c.auto_delivery = True
+    store = FinanceStore(c)
+    store.load_into_cfg()
+    store.set_auto_delivery(False)               # pause + persist
+    assert c.auto_delivery is False
+
+    # a fresh config (env default True) must pick the persisted pause back up
+    c2 = _cfg(tmp_path)
+    c2.auto_delivery = True
+    FinanceStore(c2).load_into_cfg()
+    assert c2.auto_delivery is False

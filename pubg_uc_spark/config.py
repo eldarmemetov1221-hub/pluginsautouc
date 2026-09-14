@@ -330,6 +330,13 @@ class Config:
     # but watch Spark rate limits / quota). Default 1 = fully serial.
     spark_workers: int = field(default_factory=lambda: max(1, _get_int("SPARK_WORKERS", 1)))
 
+    # Master switch for AUTOMATIC redemption. When False the plugin still tracks
+    # orders and records the buyer's UID, but never calls Spark - instead it
+    # pings the admin to deliver manually (use during a Spark outage). Toggle
+    # live from the Telegram menu or /uc_pause /uc_resume; the choice is
+    # persisted in finance.json and survives restarts.
+    auto_delivery: bool = field(default_factory=lambda: _get_bool("AUTO_DELIVERY", True))
+
     # Retry (section 12)
     max_retries: int = field(default_factory=lambda: _get_int("MAX_RETRIES", 3))
     retry_delay: float = field(default_factory=lambda: _get_float("RETRY_DELAY", 5.0))

@@ -302,6 +302,9 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             )
 
         # ---- Root menu (opened from the plugin card / /uc_prices) ---- #
+        def _auto_on():
+            return bool(getattr(cfg, "auto_delivery", True))
+
         def _root_markup():
             from telebot import types
             kb = types.InlineKeyboardMarkup(row_width=2)
@@ -309,13 +312,19 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 types.InlineKeyboardButton("📊 Статистика", callback_data="ucfin:menu"),
                 types.InlineKeyboardButton("📦 Сток", callback_data="ucfin:stock"),
             )
+            toggle = ("⏸ Выключить автовыдачу" if _auto_on()
+                      else "▶️ Включить автовыдачу")
+            kb.add(types.InlineKeyboardButton(toggle, callback_data="ucfin:toggle"))
             kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
             return kb
 
         def _root_text():
+            state = "🟢 ВКЛ" if _auto_on() else "🔴 ВЫКЛ — ручная выдача"
             return ("🎮 PUBG UC Spark\n\n"
+                    f"Автовыдача: {state}\n\n"
                     "📊 Статистика — прибыль, выручка, себестоимость, цены\n"
-                    "📦 Сток — остатки Spark и каких пачек не хватает")
+                    "📦 Сток — остатки Spark и каких пачек не хватает\n"
+                    "⏸/▶️ — вкл/выкл автоматическое начисление")
 
         def _back_markup():
             from telebot import types
@@ -364,6 +373,28 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 return
             _show_root(message.chat.id)
 
+        @bot.message_handler(commands=["uc_pause"])
+        def _pause(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            plugin.finance_store.set_auto_delivery(False)
+            reply(message,
+                  "⏸ Автовыдача ВЫКЛЮЧЕНА.\n"
+                  "Покупатели присылают UID как обычно, но начисление НЕ идёт — "
+                  "плагин копит заказы и присылает тебе UID для ручной выдачи.\n"
+                  "После выдачи помечай: /uc_setstatus <order_id> VALID\n"
+                  "Включить обратно: /uc_resume")
+
+        @bot.message_handler(commands=["uc_resume"])
+        def _resume(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            plugin.finance_store.set_auto_delivery(True)
+            reply(message,
+                  "▶️ Автовыдача ВКЛЮЧЕНА. Новые заказы начисляются автоматически.\n"
+                  "⚠️ Заказы, пришедшие на паузе, автоматически НЕ до-начисляются — "
+                  "проверь их вручную (/uc_stats).")
+
         def _set_commission(message):  # pragma: no cover
             if not guard(message):
                 return
@@ -411,6 +442,18 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     return
                 if data == "ucfin:root":
                     bot.answer_callback_query(call.id)
+                    try:
+                        bot.edit_message_text(_root_text(), chat_id, call.message.message_id,
+                                              reply_markup=_root_markup())
+                    except Exception:
+                        _show_root(chat_id)
+                    return
+                if data == "ucfin:toggle":
+                    new_state = not _auto_on()
+                    plugin.finance_store.set_auto_delivery(new_state)
+                    bot.answer_callback_query(
+                        call.id,
+                        "▶️ Автовыдача включена" if new_state else "⏸ Автовыдача выключена")
                     try:
                         bot.edit_message_text(_root_text(), chat_id, call.message.message_id,
                                               reply_markup=_root_markup())

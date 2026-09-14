@@ -148,6 +148,29 @@ class OrderService:
         code = result.code
         self.repo.add_log("uid_received", "", order_id=order.id, code_id=code.id)
         self.repo.set_order_status(order.id, OrderStatus.CODE_RECEIVED)
+
+        # Master switch: when auto-delivery is PAUSED, do NOT redeem. Keep the
+        # order at CODE_RECEIVED and the code at RECEIVED - neither is picked up
+        # by get_retriable_codes on restart (that only resumes CHECKING), so
+        # nothing auto-redeems now or later. Ping the admin to deliver manually.
+        # Used during a Spark outage to avoid failed/double redeems.
+        if not getattr(self.cfg, "auto_delivery", True):
+            self.repo.update_code(code.id, status=CodeStatus.RECEIVED)
+            self.repo.add_log(
+                "auto_delivery_paused", "held for manual fulfilment",
+                order_id=order.id, code_id=code.id,
+            )
+            log.info("[Order #%s] Auto-delivery PAUSED - holding UID %s for manual fulfilment",
+                     order.funpay_order_id, code.code)
+            self._notify_admin(
+                f"⏸ Автовыдача ВЫКЛЮЧЕНА — заказ на ручную выдачу.\n"
+                f"Заказ #{order.funpay_order_id}\n"
+                f"Товар: {self._product(order)}\n"
+                f"UID покупателя: {code.code}\n\n"
+                f"Выдай вручную, затем: /uc_setstatus {order.funpay_order_id} VALID"
+            )
+            return
+
         self.repo.set_order_status(order.id, OrderStatus.CHECKING)
         self.repo.update_code(code.id, status=CodeStatus.CHECKING)
         log.info("[Order #%s] Enqueue redeem", order.funpay_order_id)
@@ -356,6 +379,9 @@ class OrderService:
     # ------------------------------------------------------------------ #
     def resume_unfinished(self) -> int:
         """Re-enqueue codes that were mid-check / retriable when we stopped."""
+        if not getattr(self.cfg, "auto_delivery", True):
+            log.info("[Recovery] Auto-delivery paused - not resuming any codes")
+            return 0
         resumed = 0
         for code in self.repo.get_retriable_codes():
             log.info(

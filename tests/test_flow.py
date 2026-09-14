@@ -237,6 +237,44 @@ def test_admin_skip_prevents_redeem(plugin, cardinal):
     assert plugin.repo.get_codes_for_order(order.id) == []
 
 
+# 19. Auto-delivery PAUSED: buyer's UID is recorded but NOT redeemed.
+def test_auto_delivery_paused_holds_uid(plugin, cardinal):
+    plugin.cfg.auto_delivery = False
+    plugin.on_new_order(make_order(cardinal, "6001"))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "p1")
+    order = plugin.repo.get_order_by_funpay_id("6001")
+    # order held at CODE_RECEIVED (UID in), NOT auto-redeemed
+    assert order.status == OrderStatus.CODE_RECEIVED.value
+    code = plugin.repo.get_codes_for_order(order.id)[0]
+    assert code.code == VALID                       # UID captured for manual delivery
+    assert code.status == CodeStatus.RECEIVED.value  # not CHECKING -> never resumed
+    # no success/redeem message sent to the buyer
+    assert not any("Успешное пополнение" in t for t in cardinal.texts_to("chat-1"))
+
+
+# 19b. A held (paused) order is NOT auto-redeemed on restart either.
+def test_paused_hold_survives_restart(plugin, cardinal):
+    plugin.cfg.auto_delivery = False
+    plugin.on_new_order(make_order(cardinal, "6002"))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "p2")
+    # a restart resume must do nothing while paused
+    assert plugin.orders.resume_unfinished() == 0
+    assert _order_status(plugin, "6002") == OrderStatus.CODE_RECEIVED.value
+
+
+# 19c. Resuming auto-delivery: a NEW order redeems automatically again.
+def test_resume_auto_delivery_redeems(plugin, cardinal):
+    plugin.cfg.auto_delivery = False
+    plugin.on_new_order(make_order(cardinal, "6003"))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "p3")
+    assert _order_status(plugin, "6003") == OrderStatus.CODE_RECEIVED.value  # held
+    # turn it back on; a fresh order flows normally
+    plugin.cfg.auto_delivery = True
+    plugin.on_new_order(make_order(cardinal, "6004", buyer_id="D", chat_id="cD"))
+    _msg(plugin, cardinal, "D", "cD", VALID, "p4")
+    assert _order_status(plugin, "6004") == OrderStatus.VALID.value
+
+
 # 15. One buyer with multiple orders -> UID applies to the oldest active order.
 def test_one_buyer_multiple_orders(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "3001", buyer_id="C", chat_id="cC"))
