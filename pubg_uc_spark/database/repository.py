@@ -295,26 +295,33 @@ class Repository:
     # ------------------------------------------------------------------ #
     # Stats
     # ------------------------------------------------------------------ #
-    def order_status_counts(self, today_only: bool = False) -> dict:
+    def order_status_counts(self, today_only: bool = False, since: Optional[str] = None) -> dict:
         sql = "SELECT status, COUNT(*) c FROM orders"
-        params: tuple = ()
+        where, params = [], []
         if today_only:
-            sql += " WHERE created_at LIKE ?"
-            params = (f"{_now()[:10]}%",)
+            where.append("created_at LIKE ?"); params.append(f"{_now()[:10]}%")
+        if since:
+            where.append("created_at >= ?"); params.append(since)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " GROUP BY status"
-        return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
+        return {r["status"]: r["c"] for r in self.db.query_all(sql, tuple(params))}
 
-    def code_status_counts(self, today_only: bool = False) -> dict:
+    def code_status_counts(self, today_only: bool = False, since: Optional[str] = None) -> dict:
         sql = "SELECT status, COUNT(*) c FROM codes"
-        params: tuple = ()
+        where, params = [], []
         if today_only:
-            sql += " WHERE created_at LIKE ?"
-            params = (f"{_now()[:10]}%",)
+            where.append("created_at LIKE ?"); params.append(f"{_now()[:10]}%")
+        if since:
+            where.append("created_at >= ?"); params.append(since)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " GROUP BY status"
-        return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
+        return {r["status"]: r["c"] for r in self.db.query_all(sql, tuple(params))}
 
     def finance_orders(self, today_only: bool = False, days: Optional[int] = None,
-                       day: Optional[str] = None, tz_offset: int = 0) -> List[dict]:
+                       day: Optional[str] = None, tz_offset: int = 0,
+                       since: Optional[str] = None) -> List[dict]:
         """Delivered (VALID) orders for finance stats: lot_id, quantity, price, cost.
 
         Scope (first match wins):
@@ -341,6 +348,10 @@ class Repository:
         elif today_only:
             sql += " AND date(created_at, ?) = date('now', ?)"
             params += [mod, mod]
+        # Statistics epoch: exclude orders created before a reset point.
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
         return [dict(r) for r in self.db.query_all(sql, tuple(params))]
 
     def delivered_orders(self, days: Optional[int] = None) -> List[dict]:

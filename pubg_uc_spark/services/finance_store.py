@@ -52,9 +52,13 @@ class FinanceStore:
         ad = data.get("auto_delivery")
         if isinstance(ad, bool):
             self.cfg.auto_delivery = ad
-        log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s)",
+        fr = data.get("finance_reset_at")
+        if isinstance(fr, str):
+            self.cfg.finance_reset_at = fr
+        log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s, reset_at=%s)",
                  self.cfg.commission_percent, self.cfg.pack_costs,
-                 getattr(self.cfg, "auto_delivery", True))
+                 getattr(self.cfg, "auto_delivery", True),
+                 getattr(self.cfg, "finance_reset_at", "") or "-")
 
     # ------------------------------------------------------------------ #
     def set_pack_cost(self, denom: str, value: float) -> bool:
@@ -73,12 +77,18 @@ class FinanceStore:
         self.cfg.auto_delivery = bool(enabled)
         return self._write(self._current())
 
+    def set_finance_reset(self, iso_ts: str) -> bool:
+        """Set (or clear, with "") the statistics epoch and persist it."""
+        self.cfg.finance_reset_at = iso_ts or ""
+        return self._write(self._current())
+
     # ------------------------------------------------------------------ #
     def _current(self) -> Dict:
         return {
             "commission_percent": self.cfg.commission_percent,
             "pack_costs": dict(self.cfg.pack_costs),
             "auto_delivery": bool(getattr(self.cfg, "auto_delivery", True)),
+            "finance_reset_at": getattr(self.cfg, "finance_reset_at", "") or "",
         }
 
     def _read(self) -> Optional[Dict]:

@@ -88,6 +88,44 @@ def test_finance_period_and_specific_day(tmp_path):
     db.close()
 
 
+def test_finance_reset_epoch_excludes_old_orders(tmp_path):
+    """After a reset, orders created before the epoch drop out of stats but
+    remain in the DB (idempotency guard)."""
+    from datetime import datetime, timezone, timedelta
+    c = _cfg(tmp_path)
+    c.stats_tz_offset = 0
+    db = Database(c.database_path)
+    repo = Repository(db)
+
+    def _mk(oid, price, created):
+        repo.create_order(OrderRecord(funpay_order_id=oid, lot_id="60l", quantity=1,
+                                      status=OrderStatus.VALID.value, price=price, cost=45))
+        repo.db.execute("UPDATE orders SET created_at=? WHERE funpay_order_id=?", (created, oid))
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=2)).isoformat(timespec="seconds")
+    _mk("OLD", 500, old)
+    _mk("NEW", 100, now.isoformat(timespec="seconds"))
+
+    store = FinanceStore(c); store.load_into_cfg()
+    admin = AdminService(c, repo, None)
+    # before reset: both counted (revenue 600)
+    assert "600.00" in admin.finance_period()
+
+    # reset to just before NEW (i.e. now-1min): OLD excluded, NEW kept
+    store.set_finance_reset((now - timedelta(minutes=1)).isoformat(timespec="seconds"))
+    txt = admin.finance_period()
+    assert "100.00" in txt and "600.00" not in txt
+    # both orders still physically in the DB
+    assert repo.get_order_by_funpay_id("OLD") is not None
+    assert repo.get_order_by_funpay_id("NEW") is not None
+
+    # undo restores full history
+    store.set_finance_reset("")
+    assert "600.00" in admin.finance_period()
+    db.close()
+
+
 def test_finance_uses_frozen_cost_not_current(tmp_path):
     """Cost is frozen per order; changing pack costs must NOT recompute it."""
     c = _cfg(tmp_path)

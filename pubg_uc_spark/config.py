@@ -351,6 +351,11 @@ class Config:
     # Local timezone offset (hours from UTC) for finance "day"/"today"
     # boundaries. created_at is stored in UTC; MSK = 3. Env: STATS_TZ_OFFSET.
     stats_tz_offset: int = field(default_factory=lambda: _get_int("STATS_TZ_OFFSET", 3))
+    # Statistics epoch: when set (UTC ISO), finance & counts ignore orders
+    # created before it - a safe "reset stats" that never deletes order rows
+    # (those are the double-redeem guard). Set live via /uc_finance_reset;
+    # persisted in finance.json. Env seed: FINANCE_RESET_AT.
+    finance_reset_at: str = field(default_factory=lambda: _get("FINANCE_RESET_AT", ""))
     # Runtime-editable finance settings (via the Telegram /uc_prices menu) are
     # persisted here as JSON so edits survive restarts. Default: next to .env.
     finance_config_file: str = field(

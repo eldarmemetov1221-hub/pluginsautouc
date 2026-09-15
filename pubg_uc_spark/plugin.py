@@ -360,6 +360,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 types.InlineKeyboardButton("Всё время", callback_data="ucfin:fin:all"),
                 types.InlineKeyboardButton("📅 День", callback_data="ucfin:finpick"),
             )
+            kb.add(types.InlineKeyboardButton("🧹 Сбросить статистику", callback_data="ucfin:resetask"))
             kb.add(
                 types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
                 types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
@@ -403,6 +404,16 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             if not guard(message):
                 return
             _show_root(message.chat.id)
+
+        @bot.message_handler(commands=["uc_finance_reset"])
+        def _fin_reset(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = _args(message)
+            if a and a[0].lower() in ("off", "отмена", "undo", "reset"):
+                reply(message, admin.finance_reset_off())
+            else:
+                reply(message, admin.finance_reset())
 
         @bot.message_handler(commands=["uc_pause"])
         def _pause(message):  # pragma: no cover - requires telebot
@@ -524,6 +535,29 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                         chat_id, "Введите дату в формате ГГГГ-ММ-ДД (например 2026-09-15):",
                         reply_markup=_force_reply())
                     bot.register_next_step_handler(m, _finance_day)
+                    return
+                if data == "ucfin:resetask":
+                    from telebot import types
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(
+                        types.InlineKeyboardButton("✅ Да, обнулить", callback_data="ucfin:resetyes"),
+                        types.InlineKeyboardButton("❌ Отмена", callback_data="ucfin:report"),
+                    )
+                    bot.answer_callback_query(call.id)
+                    bot.edit_message_text(
+                        "🧹 Обнулить всю статистику?\n\nПрибыль и счётчики начнут "
+                        "считаться заново с этого момента. Старые заказы останутся "
+                        "в базе (защита от повторной выдачи), просто не будут "
+                        "учитываться в статистике.",
+                        chat_id, call.message.message_id, reply_markup=kb)
+                    return
+                if data == "ucfin:resetyes":
+                    bot.answer_callback_query(call.id, "Статистика обнулена")
+                    try:
+                        bot.edit_message_text(admin.finance_reset(), chat_id,
+                                              call.message.message_id, reply_markup=_fin_markup())
+                    except Exception:
+                        bot.send_message(chat_id, admin.finance_reset(), reply_markup=_fin_markup())
                     return
                 if data == "ucfin:stock":
                     bot.answer_callback_query(call.id, "Запрашиваю сток...")

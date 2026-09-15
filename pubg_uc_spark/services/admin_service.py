@@ -44,6 +44,8 @@ class AdminService:
             "/uc_finance <дней> — за период (напр. /uc_finance 7)\n"
             "/uc_finance ГГГГ-ММ-ДД — за конкретный день\n"
             "/uc_prices — меню: цены, период, себестоимость, комиссия\n"
+            "/uc_finance_reset — обнулить статистику (счёт с этого момента)\n"
+            "/uc_finance_reset off — вернуть всю историю\n"
             "/uc_stock — остатки стока Spark и каких пачек не хватает"
         )
 
@@ -143,39 +145,71 @@ class AdminService:
             return "\n\n⚠️ PACK_COSTS не заданы — себестоимость считается как 0."
         return ""
 
+    def _since(self):
+        return getattr(self.cfg, "finance_reset_at", "") or None
+
+    def _reset_note(self) -> str:
+        since = self._since()
+        if not since:
+            return ""
+        return f"\n\n(с момента сброса статистики: {since[:10]})"
+
     def finance(self) -> str:
         """Overview: revenue / commission / cost / net for all time and today."""
         tz = getattr(self.cfg, "stats_tz_offset", 0)
-        all_time = self._finance_calc(self.repo.finance_orders())
-        today = self._finance_calc(self.repo.finance_orders(today_only=True, tz_offset=tz))
+        since = self._since()
+        all_time = self._finance_calc(self.repo.finance_orders(since=since))
+        today = self._finance_calc(
+            self.repo.finance_orders(today_only=True, tz_offset=tz, since=since))
         return (
             "💰 Финансы PUBG UC (выполненные заказы)\n\n"
             f"За всё время:\n{self._finance_block(all_time)}\n\n"
-            f"Сегодня:\n{self._finance_block(today)}" + self._cost_warn()
+            f"Сегодня:\n{self._finance_block(today)}" + self._cost_warn() + self._reset_note()
         )
 
     def finance_period(self, days: int = None, day: str = None) -> str:
         """Single-scope finance report: last ``days`` days, or a specific ``day``
         (YYYY-MM-DD), or all time. Days/day boundaries use the local timezone."""
         tz = getattr(self.cfg, "stats_tz_offset", 0)
+        since = self._since()
         if day:
-            rows = self.repo.finance_orders(day=day, tz_offset=tz)
+            rows = self.repo.finance_orders(day=day, tz_offset=tz, since=since)
             title = f"💰 Финансы PUBG UC — {day}"
         elif days and int(days) == 1:
-            rows = self.repo.finance_orders(today_only=True, tz_offset=tz)
+            rows = self.repo.finance_orders(today_only=True, tz_offset=tz, since=since)
             title = "💰 Финансы PUBG UC — сегодня"
         elif days:
-            rows = self.repo.finance_orders(days=int(days), tz_offset=tz)
+            rows = self.repo.finance_orders(days=int(days), tz_offset=tz, since=since)
             title = f"💰 Финансы PUBG UC — за {int(days)} дн."
         else:
-            rows = self.repo.finance_orders()
+            rows = self.repo.finance_orders(since=since)
             title = "💰 Финансы PUBG UC — за всё время"
-        return f"{title}\n\n{self._finance_block(self._finance_calc(rows))}" + self._cost_warn()
+        return (f"{title}\n\n{self._finance_block(self._finance_calc(rows))}"
+                + self._cost_warn() + self._reset_note())
+
+    def finance_reset(self) -> str:
+        """Reset the stats epoch to now: past orders drop out of stats (order
+        rows are kept as the double-redeem guard)."""
+        from datetime import datetime, timezone
+        from .finance_store import FinanceStore
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        FinanceStore(self.cfg).set_finance_reset(now)
+        return ("🧹 Статистика обнулена. С этого момента прибыль и счётчики "
+                f"считаются заново (эпоха: {now[:19]} UTC).\n"
+                "Старые заказы сохранены (защита от повторной выдачи), просто "
+                "не учитываются в статистике.\n"
+                "Вернуть всю историю: /uc_finance_reset off")
+
+    def finance_reset_off(self) -> str:
+        from .finance_store import FinanceStore
+        FinanceStore(self.cfg).set_finance_reset("")
+        return "↩️ Сброс отменён — статистика снова считается за всю историю."
 
     def stats(self) -> str:
-        o_all = self.repo.order_status_counts()
-        o_day = self.repo.order_status_counts(today_only=True)
-        c_all = self.repo.code_status_counts()
+        since = self._since()
+        o_all = self.repo.order_status_counts(since=since)
+        o_day = self.repo.order_status_counts(today_only=True, since=since)
+        c_all = self.repo.code_status_counts(since=since)
 
         def line(d: dict) -> str:
             if not d:
