@@ -378,24 +378,47 @@ class OrderService:
     # Restart recovery (section 19 & 20)
     # ------------------------------------------------------------------ #
     def resume_unfinished(self) -> int:
-        """Re-enqueue codes that were mid-check / retriable when we stopped."""
-        if not getattr(self.cfg, "auto_delivery", True):
-            log.info("[Recovery] Auto-delivery paused - not resuming any codes")
-            return 0
-        resumed = 0
+        """On restart, DO NOT re-redeem interrupted checks (double-delivery risk).
+
+        A code left in CHECKING means a redeem was already sent to Spark but the
+        plugin restarted before recording the result. Re-sending it would consume
+        FRESH stock and DOUBLE-deliver (this actually happened once: a restart
+        mid-redeem credited a buyer twice). So instead of auto-re-redeeming, each
+        such order is flagged for manual review and the admin is pinged to check
+        Spark and either confirm it (VALID) or re-issue explicitly (/uc_recheck).
+
+        Returns the number of orders flagged for review.
+        """
+        flagged = 0
         for code in self.repo.get_retriable_codes():
-            log.info(
-                "[Recovery] Re-enqueue code_id=%s (order #%s, status=%s)",
-                code.id, code.funpay_order_id, code.status,
+            log.warning(
+                "[Recovery] Code_id=%s (order #%s) was mid-redeem at restart - "
+                "NOT re-redeeming (double-delivery risk); flagging for review",
+                code.id, code.funpay_order_id,
+            )
+            self.repo.update_code(
+                code.id,
+                status=CodeStatus.FAILED,
+                error_message="interrupted at restart - manual review (double-redeem risk)",
             )
             if code.order_id:
-                self.repo.set_order_status(code.order_id, OrderStatus.CHECKING)
-            self.repo.update_code(code.id, status=CodeStatus.CHECKING)
-            self.retry.enqueue(code.id)
-            resumed += 1
-        if resumed:
-            log.info("[Recovery] Resumed %s unfinished code check(s)", resumed)
-        return resumed
+                self.repo.set_order_status(code.order_id, OrderStatus.ERROR, force=True)
+            self.repo.add_log(
+                "restart_review",
+                "mid-redeem at restart; check Spark before re-issuing",
+                level="WARNING", order_id=code.order_id, code_id=code.id,
+            )
+            self._notify_admin(
+                f"⚠️ Заказ #{code.funpay_order_id}: перезапуск застал выдачу в процессе.\n"
+                f"UID: {code.code}\n"
+                f"Повторно НЕ выдал (риск дубля). Проверь в Spark, ушло ли UC:\n"
+                f"• уже выдано → /uc_setstatus {code.funpay_order_id} VALID\n"
+                f"• не выдано → /uc_recheck {code.id} (повторит выдачу)"
+            )
+            flagged += 1
+        if flagged:
+            log.warning("[Recovery] Flagged %s interrupted order(s) for manual review", flagged)
+        return flagged
 
     # ------------------------------------------------------------------ #
     def _notify_admin(self, text: str) -> None:

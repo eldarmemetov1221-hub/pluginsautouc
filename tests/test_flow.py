@@ -177,14 +177,15 @@ def test_critical_error(plugin, cardinal):
     assert code.attempts == 1
 
 
-# 13. Restart recovery: only a genuinely interrupted check (CHECKING) is resumed.
-def test_restart_recovery_resumes_only_checking(plugin, cardinal):
+# 13. Restart recovery: an interrupted check (CHECKING) is NOT re-redeemed
+# (double-delivery risk) - it is flagged for manual review instead.
+def test_restart_does_not_re_redeem_interrupted_check(plugin, cardinal):
     from pubg_uc_spark.database.models import CodeRecord, CodeStatus, OrderStatus
     from pubg_uc_spark.utils.validators import code_hash
 
     plugin.on_new_order(make_order(cardinal, "1013"))
     order = plugin.repo.get_order_by_funpay_id("1013")
-    # Simulate a check interrupted by a crash: a code left in CHECKING.
+    # Simulate a redeem interrupted by a restart: a code left in CHECKING.
     rec = CodeRecord(code=VALID, code_hash=code_hash(VALID), order_id=order.id,
                      funpay_order_id="1013", buyer_id="buyer-1", product="60 UC",
                      status=CodeStatus.CHECKING.value)
@@ -192,9 +193,13 @@ def test_restart_recovery_resumes_only_checking(plugin, cardinal):
     plugin.repo.set_order_status(order.id, OrderStatus.CODE_RECEIVED)
     plugin.repo.set_order_status(order.id, OrderStatus.CHECKING)
 
-    resumed = plugin.orders.resume_unfinished()
-    assert resumed == 1
-    assert _order_status(plugin, "1013") == OrderStatus.VALID.value
+    flagged = plugin.orders.resume_unfinished()
+    assert flagged == 1
+    # NOT re-redeemed: order flagged for review, code marked FAILED.
+    assert _order_status(plugin, "1013") == OrderStatus.ERROR.value
+    assert plugin.repo.get_codes_for_order(order.id)[0].status == CodeStatus.FAILED.value
+    # a second restart does nothing (no CHECKING codes remain).
+    assert plugin.orders.resume_unfinished() == 0
 
 
 # 14. Two orders (two buyers) processed independently.
