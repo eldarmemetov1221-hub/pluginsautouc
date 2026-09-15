@@ -313,15 +313,35 @@ class Repository:
         sql += " GROUP BY status"
         return {r["status"]: r["c"] for r in self.db.query_all(sql, params)}
 
-    def finance_orders(self, today_only: bool = False) -> List[dict]:
-        """Delivered (VALID) orders for finance stats: lot_id, quantity, price, cost."""
-        sql = ("SELECT lot_id, quantity, price, cost FROM orders "
-               "WHERE status = ?")
-        params: tuple = (OrderStatus.VALID.value,)
-        if today_only:
-            sql += " AND created_at LIKE ?"
-            params = (OrderStatus.VALID.value, f"{_now()[:10]}%")
-        return [dict(r) for r in self.db.query_all(sql, params)]
+    def finance_orders(self, today_only: bool = False, days: Optional[int] = None,
+                       day: Optional[str] = None, tz_offset: int = 0) -> List[dict]:
+        """Delivered (VALID) orders for finance stats: lot_id, quantity, price, cost.
+
+        Scope (first match wins):
+          * ``day``        -> a single calendar day "YYYY-MM-DD" in local time;
+          * ``days``       -> a rolling window of the last N days (24h each);
+          * ``today_only`` -> the current local calendar day.
+        ``tz_offset`` is the local timezone's hour offset from UTC (e.g. 3 for
+        MSK); created_at is stored in UTC, so day/today boundaries are shifted
+        by it. No scope -> all time.
+        """
+        off = int(tz_offset or 0)
+        mod = f"+{off} hours" if off >= 0 else f"{off} hours"
+        sql = "SELECT lot_id, quantity, price, cost FROM orders WHERE status = ?"
+        params: list = [OrderStatus.VALID.value]
+        if day:
+            sql += " AND date(created_at, ?) = ?"
+            params += [mod, day]
+        elif days and days > 0:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=days)
+            ).isoformat(timespec="seconds")
+            sql += " AND created_at >= ?"
+            params.append(cutoff)
+        elif today_only:
+            sql += " AND date(created_at, ?) = date('now', ?)"
+            params += [mod, mod]
+        return [dict(r) for r in self.db.query_all(sql, tuple(params))]
 
     def delivered_orders(self, days: Optional[int] = None) -> List[dict]:
         """Delivered (VALID) orders as {lot_id, quantity}, optionally only those

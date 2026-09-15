@@ -53,6 +53,41 @@ def test_finance_report_numbers(tmp_path):
     db.close()
 
 
+def test_finance_period_and_specific_day(tmp_path):
+    """Period (last N days) and a specific calendar day filter correctly."""
+    from datetime import datetime, timezone, timedelta
+    c = _cfg(tmp_path)
+    c.stats_tz_offset = 0                       # test in UTC for determinism
+    db = Database(c.database_path)
+    repo = Repository(db)
+
+    def _mk(oid, price, cost, created):
+        repo.create_order(OrderRecord(funpay_order_id=oid, lot_id="60l", quantity=1,
+                                      status=OrderStatus.VALID.value, price=price, cost=cost))
+        repo.db.execute("UPDATE orders SET created_at=? WHERE funpay_order_id=?", (created, oid))
+
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    d10 = (now - timedelta(days=10)).isoformat(timespec="seconds")
+    d3 = (now - timedelta(days=3)).isoformat(timespec="seconds")
+    _mk("T", 100, 40, now.isoformat(timespec="seconds"))     # today
+    _mk("D3", 200, 50, d3)                                     # 3 days ago
+    _mk("D10", 500, 60, d10)                                   # 10 days ago
+
+    admin = AdminService(c, repo, None)
+
+    # last 5 days -> only today + D3 (revenue 300)
+    assert "300.00" in admin.finance_period(days=5)
+    # last 20 days -> all three (revenue 800)
+    assert "800.00" in admin.finance_period(days=20)
+    # specific day = today -> only T (revenue 100)
+    day_txt = admin.finance_period(day=today)
+    assert today in day_txt and "100.00" in day_txt
+    # all time
+    assert "800.00" in admin.finance_period()
+    db.close()
+
+
 def test_finance_uses_frozen_cost_not_current(tmp_path):
     """Cost is frozen per order; changing pack costs must NOT recompute it."""
     c = _cfg(tmp_path)

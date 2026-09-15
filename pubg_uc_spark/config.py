@@ -348,6 +348,9 @@ class Config:
         default_factory=lambda: _get_float("COMMISSION_PERCENT", 3.0)
     )
     pack_costs: Dict[str, float] = field(default_factory=_default_pack_costs)
+    # Local timezone offset (hours from UTC) for finance "day"/"today"
+    # boundaries. created_at is stored in UTC; MSK = 3. Env: STATS_TZ_OFFSET.
+    stats_tz_offset: int = field(default_factory=lambda: _get_int("STATS_TZ_OFFSET", 3))
     # Runtime-editable finance settings (via the Telegram /uc_prices menu) are
     # persisted here as JSON so edits survive restarts. Default: next to .env.
     finance_config_file: str = field(

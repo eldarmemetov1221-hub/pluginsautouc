@@ -40,8 +40,10 @@ class AdminService:
             "/uc_pause — выключить автоначисление (ручная выдача)\n"
             "/uc_resume — снова включить автоначисление\n\n"
             "💰 Финансы:\n"
-            "/uc_finance — выручка, комиссия, себестоимость, чистая прибыль\n"
-            "/uc_prices — меню: задать себестоимость пачек и комиссию\n"
+            "/uc_finance — прибыль (всё время + сегодня)\n"
+            "/uc_finance <дней> — за период (напр. /uc_finance 7)\n"
+            "/uc_finance ГГГГ-ММ-ДД — за конкретный день\n"
+            "/uc_prices — меню: цены, период, себестоимость, комиссия\n"
             "/uc_stock — остатки стока Spark и каких пачек не хватает"
         )
 
@@ -105,49 +107,70 @@ class AdminService:
             out.append("⚠️ Не удалось прочитать наличие: " + ", ".join(unknown))
         return "\n".join(out)
 
-    def finance(self) -> str:
-        """Revenue / commission / cost / net profit over delivered orders."""
-        def calc(rows):
-            revenue = cost = 0.0
-            priced = skipped = 0
-            for r in rows:
-                p = float(r.get("price") or 0)
-                if p <= 0:
-                    skipped += 1          # order captured before price tracking
-                    continue
-                priced += 1
-                revenue += p
-                # Use the cost frozen when the order arrived; fall back to the
-                # current calc only for legacy rows that have no snapshot (0).
-                c = float(r.get("cost") or 0)
-                if c <= 0:
-                    c = self.cfg.order_cost(r.get("lot_id"), r.get("quantity") or 1)
-                cost += c
-            commission = revenue * (self.cfg.commission_percent / 100.0)
-            net = revenue - commission - cost
-            return priced, skipped, revenue, commission, cost, net
+    def _finance_calc(self, rows):
+        revenue = cost = 0.0
+        priced = skipped = 0
+        for r in rows:
+            p = float(r.get("price") or 0)
+            if p <= 0:
+                skipped += 1              # order captured before price tracking
+                continue
+            priced += 1
+            revenue += p
+            # Use the cost frozen when the order arrived; fall back to the
+            # current calc only for legacy rows that have no snapshot (0).
+            c = float(r.get("cost") or 0)
+            if c <= 0:
+                c = self.cfg.order_cost(r.get("lot_id"), r.get("quantity") or 1)
+            cost += c
+        commission = revenue * (self.cfg.commission_percent / 100.0)
+        net = revenue - commission - cost
+        return priced, skipped, revenue, commission, cost, net
 
-        def block(t) -> str:
-            priced, skipped, rev, com, cost, net = t
-            head = f"  Заказов: {priced}" + (f" (+{skipped} без цены)" if skipped else "")
-            return (
-                f"{head}\n"
-                f"  Выручка: {rev:.2f} ₽\n"
-                f"  Комиссия {self.cfg.commission_percent:g}%: −{com:.2f} ₽\n"
-                f"  Себестоимость: −{cost:.2f} ₽\n"
-                f"  Чистая прибыль: {net:.2f} ₽"
-            )
+    def _finance_block(self, t) -> str:
+        priced, skipped, rev, com, cost, net = t
+        head = f"  Заказов: {priced}" + (f" (+{skipped} без цены)" if skipped else "")
+        return (
+            f"{head}\n"
+            f"  Выручка: {rev:.2f} ₽\n"
+            f"  Комиссия {self.cfg.commission_percent:g}%: −{com:.2f} ₽\n"
+            f"  Себестоимость: −{cost:.2f} ₽\n"
+            f"  Чистая прибыль: {net:.2f} ₽"
+        )
 
-        all_time = calc(self.repo.finance_orders())
-        today = calc(self.repo.finance_orders(today_only=True))
-        warn = ""
+    def _cost_warn(self) -> str:
         if not self.cfg.pack_costs:
-            warn = "\n\n⚠️ PACK_COSTS не заданы — себестоимость считается как 0."
+            return "\n\n⚠️ PACK_COSTS не заданы — себестоимость считается как 0."
+        return ""
+
+    def finance(self) -> str:
+        """Overview: revenue / commission / cost / net for all time and today."""
+        tz = getattr(self.cfg, "stats_tz_offset", 0)
+        all_time = self._finance_calc(self.repo.finance_orders())
+        today = self._finance_calc(self.repo.finance_orders(today_only=True, tz_offset=tz))
         return (
             "💰 Финансы PUBG UC (выполненные заказы)\n\n"
-            f"За всё время:\n{block(all_time)}\n\n"
-            f"Сегодня:\n{block(today)}" + warn
+            f"За всё время:\n{self._finance_block(all_time)}\n\n"
+            f"Сегодня:\n{self._finance_block(today)}" + self._cost_warn()
         )
+
+    def finance_period(self, days: int = None, day: str = None) -> str:
+        """Single-scope finance report: last ``days`` days, or a specific ``day``
+        (YYYY-MM-DD), or all time. Days/day boundaries use the local timezone."""
+        tz = getattr(self.cfg, "stats_tz_offset", 0)
+        if day:
+            rows = self.repo.finance_orders(day=day, tz_offset=tz)
+            title = f"💰 Финансы PUBG UC — {day}"
+        elif days and int(days) == 1:
+            rows = self.repo.finance_orders(today_only=True, tz_offset=tz)
+            title = "💰 Финансы PUBG UC — сегодня"
+        elif days:
+            rows = self.repo.finance_orders(days=int(days), tz_offset=tz)
+            title = f"💰 Финансы PUBG UC — за {int(days)} дн."
+        else:
+            rows = self.repo.finance_orders()
+            title = "💰 Финансы PUBG UC — за всё время"
+        return f"{title}\n\n{self._finance_block(self._finance_calc(rows))}" + self._cost_warn()
 
     def stats(self) -> str:
         o_all = self.repo.order_status_counts()

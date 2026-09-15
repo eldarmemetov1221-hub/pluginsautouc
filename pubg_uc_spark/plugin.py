@@ -257,7 +257,18 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         def _finance(message):  # pragma: no cover - requires telebot
             if not guard(message):
                 return
-            reply(message, admin.finance() + "\n\n⚙️ Настроить цены: /uc_prices")
+            import re
+            a = _args(message)
+            if a:
+                arg = a[0]
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg):
+                    reply(message, admin.finance_period(day=arg)); return
+                if arg.isdigit():
+                    reply(message, admin.finance_period(days=int(arg))); return
+            reply(message, admin.finance()
+                  + "\n\n📅 Период: /uc_finance <дней> (напр. /uc_finance 7)"
+                  + "\n📆 Конкретный день: /uc_finance ГГГГ-ММ-ДД"
+                  + "\n⚙️ Настроить цены: /uc_prices")
 
         # ---- Interactive price/commission menu (/uc_prices) ---- #
         def _fmt_money(v):
@@ -329,6 +340,26 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
         def _back_markup():
             from telebot import types
             kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
+                types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
+            )
+            return kb
+
+        def _fin_markup():
+            """Period picker under the finance report."""
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=3)
+            kb.add(
+                types.InlineKeyboardButton("Сегодня", callback_data="ucfin:fin:1"),
+                types.InlineKeyboardButton("5 дней", callback_data="ucfin:fin:5"),
+                types.InlineKeyboardButton("7 дней", callback_data="ucfin:fin:7"),
+            )
+            kb.add(
+                types.InlineKeyboardButton("20 дней", callback_data="ucfin:fin:20"),
+                types.InlineKeyboardButton("Всё время", callback_data="ucfin:fin:all"),
+                types.InlineKeyboardButton("📅 День", callback_data="ucfin:finpick"),
+            )
             kb.add(
                 types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
                 types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
@@ -417,6 +448,18 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             reply(message, f"✅ Себестоимость {denom} UC: {_fmt_money(v)} ₽")
             _show_menu(message.chat.id)
 
+        def _finance_day(message):  # pragma: no cover
+            if not guard(message):
+                return
+            import re
+            t = (getattr(message, "text", "") or "").strip()
+            m = re.search(r"\d{4}-\d{2}-\d{2}", t)
+            if not m:
+                reply(message, "Не похоже на дату. Нужен формат ГГГГ-ММ-ДД, например 2026-09-15. Отменено.")
+                return
+            bot.send_message(message.chat.id, admin.finance_period(day=m.group(0)),
+                             reply_markup=_fin_markup())
+
         @bot.callback_query_handler(func=lambda c: (getattr(c, "data", "") or "").startswith("ucfin:"))
         def _fin_cb(call):  # pragma: no cover - requires telebot
             uid = getattr(getattr(call, "from_user", None), "id", None)
@@ -462,7 +505,25 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     return
                 if data == "ucfin:report":
                     bot.answer_callback_query(call.id)
-                    bot.send_message(chat_id, admin.finance(), reply_markup=_back_markup())
+                    bot.send_message(chat_id, admin.finance(), reply_markup=_fin_markup())
+                    return
+                if data.startswith("ucfin:fin:"):
+                    arg = data.split(":", 2)[2]
+                    bot.answer_callback_query(call.id)
+                    txt = (admin.finance_period() if arg == "all"
+                           else admin.finance_period(days=int(arg)))
+                    try:
+                        bot.edit_message_text(txt, chat_id, call.message.message_id,
+                                              reply_markup=_fin_markup())
+                    except Exception:
+                        bot.send_message(chat_id, txt, reply_markup=_fin_markup())
+                    return
+                if data == "ucfin:finpick":
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(
+                        chat_id, "Введите дату в формате ГГГГ-ММ-ДД (например 2026-09-15):",
+                        reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, _finance_day)
                     return
                 if data == "ucfin:stock":
                     bot.answer_callback_query(call.id, "Запрашиваю сток...")
