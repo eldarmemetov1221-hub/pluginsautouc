@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status            TEXT NOT NULL,
     chat_id           TEXT,
     price             REAL DEFAULT 0,
+    cost              REAL DEFAULT 0,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -103,6 +104,13 @@ class Database:
             # as "no price" in finance stats until re-captured on new orders).
             self._conn.execute("ALTER TABLE orders ADD COLUMN price REAL DEFAULT 0")
             log.info("Migrated: added orders.price column")
+        if "cost" not in cols:
+            # Frozen cost-of-goods snapshot taken when the order arrives, so that
+            # later changes to pack costs never retroactively recompute old
+            # orders. Legacy rows -> 0, and finance falls back to the current
+            # calc for those until they age out.
+            self._conn.execute("ALTER TABLE orders ADD COLUMN cost REAL DEFAULT 0")
+            log.info("Migrated: added orders.cost column")
 
     @property
     def lock(self) -> threading.RLock:

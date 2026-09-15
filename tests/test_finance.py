@@ -38,6 +38,7 @@ def test_finance_report_numbers(tmp_path):
     c = _cfg(tmp_path)
     db = Database(c.database_path)
     repo = Repository(db)
+    # legacy rows (no cost snapshot) -> finance falls back to current pack costs
     repo.create_order(OrderRecord(funpay_order_id="A", lot_id="60l", quantity=1,
                                   status=OrderStatus.VALID.value, price=100))
     repo.create_order(OrderRecord(funpay_order_id="B", lot_id="720l", quantity=1,
@@ -49,6 +50,24 @@ def test_finance_report_numbers(tmp_path):
     assert "30.00" in txt
     assert "490.00" in txt
     assert "480.00" in txt
+    db.close()
+
+
+def test_finance_uses_frozen_cost_not_current(tmp_path):
+    """Cost is frozen per order; changing pack costs must NOT recompute it."""
+    c = _cfg(tmp_path)
+    db = Database(c.database_path)
+    repo = Repository(db)
+    # order arrived when 60-pack cost was 45 -> frozen cost 45
+    repo.create_order(OrderRecord(funpay_order_id="A", lot_id="60l", quantity=1,
+                                  status=OrderStatus.VALID.value, price=100, cost=45))
+    # now the seller raises the 60-pack cost to 90
+    c.pack_costs = {"60": 90.0, "660": 400.0}
+    admin = AdminService(c, repo, None)
+    txt = admin.finance()
+    # cost must stay 45 (frozen), NOT 90; net = 100 - 3 - 45 = 52
+    assert "Себестоимость: −45.00 ₽" in txt
+    assert "52.00" in txt
     db.close()
 
 

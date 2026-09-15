@@ -110,6 +110,7 @@ class OrderRecord:
     status: str = OrderStatus.NEW.value
     chat_id: str = ""
     price: float = 0.0
+    cost: float = 0.0          # frozen cost-of-goods snapshot at order arrival
     created_at: str = ""
     updated_at: str = ""
 

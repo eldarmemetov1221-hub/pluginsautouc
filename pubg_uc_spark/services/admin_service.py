@@ -117,7 +117,12 @@ class AdminService:
                     continue
                 priced += 1
                 revenue += p
-                cost += self.cfg.order_cost(r.get("lot_id"), r.get("quantity") or 1)
+                # Use the cost frozen when the order arrived; fall back to the
+                # current calc only for legacy rows that have no snapshot (0).
+                c = float(r.get("cost") or 0)
+                if c <= 0:
+                    c = self.cfg.order_cost(r.get("lot_id"), r.get("quantity") or 1)
+                cost += c
             commission = revenue * (self.cfg.commission_percent / 100.0)
             net = revenue - commission - cost
             return priced, skipped, revenue, commission, cost, net

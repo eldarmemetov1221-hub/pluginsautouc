@@ -85,10 +85,16 @@ class OrderService:
         just moves the order to WAITING_FOR_CODE and waits for the buyer to send
         their PUBG UID.
         """
+        # Freeze the cost-of-goods at arrival time using the CURRENT pack costs,
+        # so later changes to себестоимость never retroactively recompute this
+        # order. INSERT OR IGNORE means the first-seen snapshot wins on replays.
+        if not info.cost:
+            info.cost = self.cfg.order_cost(info.lot_id, info.quantity)
         order = self.repo.create_order(info)
         self.repo.add_log(
             "order_seen",
-            f"lot={order.lot_id} buyer={order.buyer_username} qty={order.quantity}",
+            f"lot={order.lot_id} buyer={order.buyer_username} qty={order.quantity} "
+            f"cost={order.cost:.2f}",
             order_id=order.id,
         )
         log.info(
