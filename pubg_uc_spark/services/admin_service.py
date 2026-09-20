@@ -43,6 +43,8 @@ class AdminService:
             "/uc_finance — прибыль (всё время + сегодня)\n"
             "/uc_finance <дней> — за период (напр. /uc_finance 7)\n"
             "/uc_finance ГГГГ-ММ-ДД — за конкретный день\n"
+            "/uc_codes — сколько и каких пачек активировано (сегодня)\n"
+            "/uc_codes <дней> / ГГГГ-ММ-ДД — за период/день\n"
             "/uc_prices — меню: цены, период, себестоимость, комиссия\n"
             "/uc_finance_reset — обнулить статистику (счёт с этого момента)\n"
             "/uc_finance_reset off — вернуть всю историю\n"
@@ -186,6 +188,54 @@ class AdminService:
             title = "💰 Финансы PUBG UC — за всё время"
         return (f"{title}\n\n{self._finance_block(self._finance_calc(rows))}"
                 + self._cost_warn() + self._reset_note())
+
+    def codes_activated(self, days: int = None, day: str = None) -> str:
+        """Per-denomination count of Spark packs (codes) delivered in a scope.
+
+        Counts the base-pack combination of every delivered (VALID) order in the
+        period: e.g. a 120 UC order (2×60) contributes two 60-packs. Respects the
+        stats reset epoch and the local timezone."""
+        tz = getattr(self.cfg, "stats_tz_offset", 0)
+        since = self._since()
+        if day:
+            rows = self.repo.finance_orders(day=day, tz_offset=tz, since=since)
+            title = f"🎟 Активировано кодов — {day}"
+        elif days and int(days) == 1:
+            rows = self.repo.finance_orders(today_only=True, tz_offset=tz, since=since)
+            title = "🎟 Активировано кодов — сегодня"
+        elif days:
+            rows = self.repo.finance_orders(days=int(days), tz_offset=tz, since=since)
+            title = f"🎟 Активировано кодов — за {int(days)} дн."
+        else:
+            rows = self.repo.finance_orders(since=since)
+            title = "🎟 Активировано кодов — за всё время"
+
+        per: dict = {}
+        total_uc = 0
+        orders = 0
+        for r in rows:
+            orders += 1
+            lot = self.cfg.lot(r.get("lot_id"))
+            if not lot:
+                continue
+            for denom, cnt in lot.picks_for(r.get("quantity") or 1).items():
+                per[str(denom)] = per.get(str(denom), 0) + cnt
+                total_uc += int(denom) * cnt
+
+        lines = [title, ""]
+        if not per:
+            lines.append("  — за этот период активаций нет")
+            return "\n".join(lines) + self._reset_note()
+        # known base denominations first, then any leftovers
+        order_keys = [d for d in SPARK_BASE_DENOMINATIONS if per.get(d)]
+        order_keys += [d for d in per if d not in SPARK_BASE_DENOMINATIONS]
+        for d in order_keys:
+            lines.append(f"  {d} UC × {per[d]} шт.")
+        lines.append("")
+        lines.append(f"Заказов: {orders}")
+        lines.append(f"Кодов всего: {sum(per.values())}")
+        lines.append(f"UC выдано: {total_uc}")
+        return "\n".join(lines) + self._reset_note()
 
     def finance_reset(self) -> str:
         """Reset the stats epoch to now: past orders drop out of stats (order

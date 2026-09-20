@@ -88,6 +88,31 @@ def test_finance_period_and_specific_day(tmp_path):
     db.close()
 
 
+def test_codes_activated_per_denomination(tmp_path):
+    """Per-denomination pack counts sum each delivered order's picks."""
+    c = _cfg(tmp_path)
+    c.stats_tz_offset = 0
+    db = Database(c.database_path)
+    repo = Repository(db)
+    # 60l = {60:1}; 720l = {660:1, 60:1}
+    repo.create_order(OrderRecord(funpay_order_id="A", lot_id="60l", quantity=2,
+                                  status=OrderStatus.VALID.value, price=100, cost=45))
+    repo.create_order(OrderRecord(funpay_order_id="B", lot_id="720l", quantity=1,
+                                  status=OrderStatus.VALID.value, price=900, cost=445))
+    # a non-VALID order must not be counted
+    repo.create_order(OrderRecord(funpay_order_id="C", lot_id="60l", quantity=5,
+                                  status=OrderStatus.ERROR.value, price=0))
+    admin = AdminService(c, repo, None)
+    txt = admin.codes_activated()
+    # 60: 2 (from A) + 1 (from B) = 3 ; 660: 1 (from B)
+    assert "60 UC × 3 шт." in txt
+    assert "660 UC × 1 шт." in txt
+    assert "Кодов всего: 4" in txt
+    # UC delivered: 60*3 + 660*1 = 840
+    assert "UC выдано: 840" in txt
+    db.close()
+
+
 def test_finance_reset_epoch_excludes_old_orders(tmp_path):
     """After a reset, orders created before the epoch drop out of stats but
     remain in the DB (idempotency guard)."""

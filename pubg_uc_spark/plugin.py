@@ -360,9 +360,32 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 types.InlineKeyboardButton("Всё время", callback_data="ucfin:fin:all"),
                 types.InlineKeyboardButton("📅 День", callback_data="ucfin:finpick"),
             )
-            kb.add(types.InlineKeyboardButton("🧹 Сбросить статистику", callback_data="ucfin:resetask"))
+            kb.add(
+                types.InlineKeyboardButton("🎟 Коды", callback_data="ucfin:codes:1"),
+                types.InlineKeyboardButton("🧹 Сбросить статистику", callback_data="ucfin:resetask"),
+            )
             kb.add(
                 types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
+                types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
+            )
+            return kb
+
+        def _codes_markup():
+            """Period picker for the 'activated codes' report."""
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=3)
+            kb.add(
+                types.InlineKeyboardButton("Сегодня", callback_data="ucfin:codes:1"),
+                types.InlineKeyboardButton("5 дней", callback_data="ucfin:codes:5"),
+                types.InlineKeyboardButton("7 дней", callback_data="ucfin:codes:7"),
+            )
+            kb.add(
+                types.InlineKeyboardButton("20 дней", callback_data="ucfin:codes:20"),
+                types.InlineKeyboardButton("Всё время", callback_data="ucfin:codes:all"),
+                types.InlineKeyboardButton("📅 День", callback_data="ucfin:codespick"),
+            )
+            kb.add(
+                types.InlineKeyboardButton("💰 Финансы", callback_data="ucfin:report"),
                 types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"),
             )
             return kb
@@ -414,6 +437,22 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 reply(message, admin.finance_reset_off())
             else:
                 reply(message, admin.finance_reset())
+
+        @bot.message_handler(commands=["uc_codes"])
+        def _codes(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            import re
+            a = _args(message)
+            if a:
+                arg = a[0]
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg):
+                    reply(message, admin.codes_activated(day=arg)); return
+                if arg.isdigit():
+                    reply(message, admin.codes_activated(days=int(arg))); return
+            reply(message, admin.codes_activated(days=1)
+                  + "\n\n📅 Период: /uc_codes <дней> (напр. /uc_codes 7)"
+                  + "\n📆 День: /uc_codes ГГГГ-ММ-ДД")
 
         @bot.message_handler(commands=["uc_pause"])
         def _pause(message):  # pragma: no cover - requires telebot
@@ -470,6 +509,18 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 return
             bot.send_message(message.chat.id, admin.finance_period(day=m.group(0)),
                              reply_markup=_fin_markup())
+
+        def _codes_day(message):  # pragma: no cover
+            if not guard(message):
+                return
+            import re
+            t = (getattr(message, "text", "") or "").strip()
+            m = re.search(r"\d{4}-\d{2}-\d{2}", t)
+            if not m:
+                reply(message, "Не похоже на дату. Нужен формат ГГГГ-ММ-ДД, например 2026-09-15. Отменено.")
+                return
+            bot.send_message(message.chat.id, admin.codes_activated(day=m.group(0)),
+                             reply_markup=_codes_markup())
 
         @bot.callback_query_handler(func=lambda c: (getattr(c, "data", "") or "").startswith("ucfin:"))
         def _fin_cb(call):  # pragma: no cover - requires telebot
@@ -535,6 +586,24 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                         chat_id, "Введите дату в формате ГГГГ-ММ-ДД (например 2026-09-15):",
                         reply_markup=_force_reply())
                     bot.register_next_step_handler(m, _finance_day)
+                    return
+                if data.startswith("ucfin:codes:"):
+                    arg = data.split(":", 2)[2]
+                    bot.answer_callback_query(call.id)
+                    txt = (admin.codes_activated() if arg == "all"
+                           else admin.codes_activated(days=int(arg)))
+                    try:
+                        bot.edit_message_text(txt, chat_id, call.message.message_id,
+                                              reply_markup=_codes_markup())
+                    except Exception:
+                        bot.send_message(chat_id, txt, reply_markup=_codes_markup())
+                    return
+                if data == "ucfin:codespick":
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(
+                        chat_id, "Введите дату в формате ГГГГ-ММ-ДД (например 2026-09-15):",
+                        reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, _codes_day)
                     return
                 if data == "ucfin:resetask":
                     from telebot import types
