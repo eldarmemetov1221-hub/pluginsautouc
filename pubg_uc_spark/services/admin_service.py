@@ -35,7 +35,9 @@ class AdminService:
             "/uc_cancel <code_id> — отменить автоповторы (FAILED)\n"
             "/uc_setstatus <order_id> <СТАТУС> — сменить статус заказа\n"
             "/uc_resend <order_id> — попросить покупателя прислать UID\n"
-            "/uc_skip <order_id> — не начислять (если выдали вручную)\n\n"
+            "/uc_skip <order_id> — не начислять (если выдали вручную)\n"
+            "/uc_addorder <order_id> <lot_id> <uid> [цена] — завести и выдать "
+            "пропущенный заказ (если плагин его не увидел)\n\n"
             "⏯ Автовыдача:\n"
             "/uc_pause — выключить автоначисление (ручная выдача)\n"
             "/uc_resume — снова включить автоначисление\n\n"
@@ -370,6 +372,97 @@ class AdminService:
                           order_id=order.id)
         return (f"Order #{oid} marked CANCELLED - the plugin will NOT auto-redeem it "
                 f"(use this after manual fulfilment).")
+
+    def add_order(self, funpay_order_id: str, lot_id: str, uid: str,
+                  price=None, quantity=1) -> str:
+        """Manually register a plugin-missed order and deliver it via the plugin.
+
+        Use this for the rare case where FunPayCardinal never dispatched a
+        NEW_ORDER event (e.g. FunPay served an unparseable page), so the order
+        is not in the DB and would otherwise need fully manual fulfilment. This
+        creates the order (with a frozen cost snapshot, so finance stays correct),
+        stores the buyer's UID as a code and pushes it through the normal redeem
+        pipeline - counting toward statistics like any other order.
+
+        Safety: it is a deliberate manual action, not an auto-scan (auto-scan is
+        never rebuilt - it caused double-deliveries). It is idempotent: if the
+        order already exists it refuses and points at /uc_order, so re-running the
+        command can never double-credit. When auto-delivery is paused it only
+        registers the order and holds it for manual fulfilment.
+        """
+        from ..database.models import CodeRecord, OrderRecord
+        from ..utils.validators import code_hash, is_valid_format
+
+        oid = str(funpay_order_id)
+        lot = self.cfg.lot(str(lot_id))
+        if lot is None:
+            avail = ", ".join(str(lc.lot_id) for lc in self.cfg.lots.values()) or "—"
+            return (f"❌ Лот '{lot_id}' не найден.\n"
+                    f"Доступные lot_id: {avail}")
+
+        uid = str(uid).strip()
+        if not is_valid_format(uid, self.cfg.code_pattern):
+            return (f"❌ UID '{uid}' не проходит проверку формата — похоже на "
+                    f"опечатку. Проверь игровой ID и повтори.")
+
+        try:
+            qty = max(1, int(quantity))
+        except (TypeError, ValueError):
+            qty = 1
+
+        # Idempotency guard: never touch an order that already exists (it may
+        # already be delivered/in-flight) - re-issuing would double-credit.
+        existing = self.repo.get_order_by_funpay_id(oid)
+        if existing is not None:
+            return (f"⚠️ Заказ #{oid} уже есть в базе (статус {existing.status}). "
+                    f"Не трогаю — риск повторной выдачи.\n"
+                    f"Проверь: /uc_order {oid}")
+
+        p = 0.0
+        if price is not None:
+            try:
+                p = float(str(price).replace(",", "."))
+            except (TypeError, ValueError):
+                p = 0.0
+        # Freeze cost-of-goods at the current pack costs, exactly like a normal
+        # arrival, so later price changes never recompute this order.
+        cost = self.cfg.order_cost(str(lot_id), qty)
+        order = self.repo.create_order(OrderRecord(
+            funpay_order_id=oid, lot_id=str(lot_id), quantity=qty,
+            status=OrderStatus.WAITING_FOR_CODE.value, price=p, cost=cost,
+        ))
+        self.repo.add_log(
+            "admin_addorder",
+            f"lot={lot_id} qty={qty} uid={mask_code(uid)} price={p:.2f} cost={cost:.2f}",
+            order_id=order.id,
+        )
+
+        record = CodeRecord(
+            code=uid, code_hash=code_hash(uid), order_id=order.id,
+            funpay_order_id=oid, buyer_id=order.buyer_id, product=lot.product,
+            status=CodeStatus.RECEIVED.value, source="admin_addorder",
+        )
+        code, _created = self.repo.create_code(record)
+        self.repo.set_order_status(order.id, OrderStatus.CODE_RECEIVED, force=True)
+
+        # Respect the auto-delivery kill switch: when paused, register + hold.
+        if not getattr(self.cfg, "auto_delivery", True):
+            self.repo.update_code(code.id, status=CodeStatus.RECEIVED)
+            return (f"⏸ Автовыдача ВЫКЛЮЧЕНА — заказ зарегистрирован, но не начислен.\n"
+                    f"Заказ #{oid}\nТовар: {lot.product}"
+                    + (f" ×{qty}" if qty > 1 else "")
+                    + f"\nUID: {uid}\n\n"
+                    f"Выдай вручную, затем: /uc_setstatus {oid} VALID\n"
+                    f"Либо включи автовыдачу (/uc_resume) и: /uc_recheck {code.id}")
+
+        # Deliver through the normal pipeline (same path as a live order).
+        self.repo.set_order_status(order.id, OrderStatus.CHECKING, force=True)
+        self.repo.update_code(code.id, status=CodeStatus.CHECKING)
+        self.orders.retry.enqueue(code.id)
+        return (f"✅ Заказ #{oid} заведён и отправлен на выдачу.\n"
+                f"Товар: {lot.product}" + (f" ×{qty}" if qty > 1 else "")
+                + f"\nUID: {uid}\nКод #{code.id}\n\n"
+                f"Результат придёт сюда. Статус: /uc_order {oid}")
 
     def resend_ask(self, funpay_order_id: str) -> str:
         """Manually ask the buyer for their UID (the bot never does this auto)."""

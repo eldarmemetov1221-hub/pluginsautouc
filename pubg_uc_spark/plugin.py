@@ -253,6 +253,17 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             a = _args(message)
             reply(message, admin.skip(a[0]) if a else "Usage: /uc_skip <funpay_order_id>")
 
+        @bot.message_handler(commands=["uc_addorder"])
+        def _addorder(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = _args(message)
+            if len(a) < 3:
+                reply(message, "Usage: /uc_addorder <order_id> <lot_id> <uid> [price]")
+                return
+            price = a[3] if len(a) >= 4 else None
+            reply(message, admin.add_order(a[0], a[1], a[2], price=price))
+
         @bot.message_handler(commands=["uc_finance"])
         def _finance(message):  # pragma: no cover - requires telebot
             if not guard(message):

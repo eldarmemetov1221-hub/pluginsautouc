@@ -280,6 +280,57 @@ def test_resume_auto_delivery_redeems(plugin, cardinal):
     assert _order_status(plugin, "6004") == OrderStatus.VALID.value
 
 
+# 20. /uc_addorder: a plugin-missed order is registered and delivered manually.
+def test_addorder_delivers_missed_order(plugin, cardinal):
+    # FunPay never dispatched NEW_ORDER for this one; admin adds it by hand.
+    plugin.cfg.pack_costs = {"60": 45.0}                  # so cost snapshot is non-zero
+    assert plugin.repo.get_order_by_funpay_id("YN9198Z5") is None
+    out = plugin.admin.add_order("YN9198Z5", "37330959", VALID, price="165.47")
+    assert "заведён" in out
+    order = plugin.repo.get_order_by_funpay_id("YN9198Z5")
+    assert order is not None
+    assert order.status == OrderStatus.VALID.value       # redeemed through pipeline
+    assert order.price == 165.47                          # counts in finance
+    assert order.cost == 45.0                             # frozen cost snapshot (60-pack)
+    code = plugin.repo.get_codes_for_order(order.id)[0]
+    assert code.code == VALID
+    assert code.status == CodeStatus.VALID.value
+
+
+# 20b. /uc_addorder is idempotent: it never re-credits an existing order.
+def test_addorder_refuses_existing_order(plugin, cardinal):
+    plugin.on_new_order(make_order(cardinal, "1004x"))
+    _msg(plugin, cardinal, "buyer-1", "chat-1", VALID, "mx")
+    assert _order_status(plugin, "1004x") == OrderStatus.VALID.value
+    before = len(_codes(plugin, "1004x"))
+    out = plugin.admin.add_order("1004x", "37330959", VALID)
+    assert "уже есть" in out
+    # no extra code, order untouched
+    assert len(_codes(plugin, "1004x")) == before
+    assert _order_status(plugin, "1004x") == OrderStatus.VALID.value
+
+
+# 20c. /uc_addorder respects the auto-delivery kill switch: register + hold.
+def test_addorder_respects_pause(plugin, cardinal):
+    plugin.cfg.auto_delivery = False
+    out = plugin.admin.add_order("PAUSED1", "37330959", VALID)
+    assert "ВЫКЛЮЧЕНА" in out
+    order = plugin.repo.get_order_by_funpay_id("PAUSED1")
+    assert order.status == OrderStatus.CODE_RECEIVED.value   # held, not redeemed
+    code = plugin.repo.get_codes_for_order(order.id)[0]
+    assert code.status == CodeStatus.RECEIVED.value          # never CHECKING -> never resumed
+    assert plugin.orders.resume_unfinished() == 0
+
+
+# 20d. /uc_addorder validates the lot id and the UID format.
+def test_addorder_rejects_bad_input(plugin, cardinal):
+    assert "не найден" in plugin.admin.add_order("O1", "99999999", VALID)
+    assert "формат" in plugin.admin.add_order("O2", "37330959", "abc")
+    # nothing was created for either rejection
+    assert plugin.repo.get_order_by_funpay_id("O1") is None
+    assert plugin.repo.get_order_by_funpay_id("O2") is None
+
+
 # 15. One buyer with multiple orders -> UID applies to the oldest active order.
 def test_one_buyer_multiple_orders(plugin, cardinal):
     plugin.on_new_order(make_order(cardinal, "3001", buyer_id="C", chat_id="cC"))
