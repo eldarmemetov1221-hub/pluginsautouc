@@ -55,6 +55,8 @@ class LioGamesClient:
         self.cfg = config
         self._product_id: Optional[int] = None
         self._variation_cache: Dict[str, str] = dict(getattr(config, "liog_variations", {}) or {})
+        self._products_cache: Optional[List[dict]] = None
+        self._product_obj: Optional[dict] = None
 
     # ------------------------------------------------------------------ #
     # Signing & transport
@@ -132,8 +134,70 @@ class LioGamesClient:
         return body
 
     # ------------------------------------------------------------------ #
-    # Catalogue resolution
+    # Catalogue resolution (tolerant of a flaky /products endpoint)
     # ------------------------------------------------------------------ #
+    def _raw_get(self, url: str, params: dict = None):
+        """GET without raising: returns (status, json_or_None, text_snippet)."""
+        if requests is None:  # pragma: no cover
+            return (None, None, "requests missing")
+        headers = {"Accept": "application/json"}
+        if self.cfg.liog_key_id:
+            headers["X-LIOG-KEY-ID"] = self.cfg.liog_key_id
+        try:
+            r = requests.get(url, params=params or {}, headers=headers, timeout=self.cfg.liog_timeout)
+        except Exception as exc:
+            return (None, None, str(exc))
+        snippet = ""
+        try:
+            snippet = (r.text or "").strip().replace("\n", " ")[:200]
+        except Exception:
+            pass
+        js = None
+        try:
+            js = r.json()
+        except Exception:
+            js = None
+        return (r.status_code, js, snippet)
+
+    def _catalogue_sources(self):
+        base = self.cfg.liog_base_url
+        root = base.split("/api/")[0]
+        # Several shapes seen in the wild; /products sometimes 500s, so fall back.
+        return [
+            base + "/products",
+            base + "/products/",
+            base + "/catalog.json",
+            root + "/catalog.json",
+        ]
+
+    @staticmethod
+    def _items_from(js) -> List[dict]:
+        items = _as_list(js)
+        if not items and isinstance(js, dict):
+            # catalog.json is sometimes a map keyed by product id
+            vals = [v for v in js.values() if isinstance(v, dict)]
+            if vals:
+                items = vals
+        return items
+
+    def _load_products(self) -> List[dict]:
+        if self._products_cache is not None:
+            return self._products_cache
+        tried = []
+        for url in self._catalogue_sources():
+            status, js, snippet = self._raw_get(url)
+            if status == 200 and js is not None:
+                items = self._items_from(js)
+                if items:
+                    self._products_cache = items
+                    log.info("[LioGames] catalogue from %s (%d products)", url, len(items))
+                    return items
+            tried.append(f"{_short(url)}→{status}")
+        raise LiogCriticalError(
+            "LioGames каталог не читается (" + ", ".join(tried) + "). "
+            "Задай вручную LIOG_PRODUCT_ID и LIOG_VARIATIONS в .env."
+        )
+
     def resolve_product_id(self) -> int:
         if self._product_id:
             return self._product_id
@@ -143,10 +207,8 @@ class LioGamesClient:
         if self.cfg.liog_mock:
             self._product_id = 99001
             return self._product_id
-        body = self._get(self.cfg.liog_products_url())
-        items = _as_list(body)
+        items = self._load_products()
         want = (self.cfg.liog_product_name or "").lower()
-        # Prefer an exact-ish name match; fall back to a contains("pubg"+"code").
         best = None
         for it in items:
             name = str(it.get("name") or it.get("title") or "").lower()
@@ -154,18 +216,38 @@ class LioGamesClient:
             if not pid:
                 continue
             if name == want:
-                best = pid
+                best, self._product_obj = pid, it
                 break
             if ("pubg" in name and "code" in name) or (want and want in name):
-                best = best or pid
+                if best is None:
+                    best, self._product_obj = pid, it
         if not best:
+            names = ", ".join(str(it.get("name") or it.get("title") or "?") for it in items[:15])
             raise LiogCriticalError(
-                f"LioGames product '{self.cfg.liog_product_name}' not found in catalogue "
-                f"({len(items)} products). Set LIOG_PRODUCT_ID explicitly."
+                f"Товар '{self.cfg.liog_product_name}' не найден среди {len(items)}: {names}. "
+                f"Задай LIOG_PRODUCT_ID."
             )
         self._product_id = int(best)
-        log.info("[LioGames] Resolved product_id=%s (%s)", self._product_id, self.cfg.liog_product_name)
+        log.info("[LioGames] product_id=%s (%s)", self._product_id, self.cfg.liog_product_name)
         return self._product_id
+
+    def _load_variations(self, product_id) -> List[dict]:
+        # Variations are often embedded in the product object from the catalogue.
+        if self._product_obj:
+            for k in ("variations", "packs", "denominations", "options", "variants"):
+                v = self._product_obj.get(k)
+                if isinstance(v, list) and v:
+                    return [x for x in v if isinstance(x, dict)]
+        # Otherwise hit the dedicated endpoint (also tolerant of a 500).
+        status, js, snippet = self._raw_get(self.cfg.liog_variations_url(product_id))
+        if status == 200 and js is not None:
+            items = self._items_from(js)
+            if items:
+                return items
+        raise LiogCriticalError(
+            f"Список вариаций товара {product_id} не читается (HTTP {status}). "
+            f"Задай LIOG_VARIATIONS в .env."
+        )
 
     def resolve_variation_id(self, denom: str) -> str:
         denom = str(denom)
@@ -176,30 +258,24 @@ class LioGamesClient:
             self._variation_cache[denom] = vid
             return vid
         pid = self.resolve_product_id()
-        body = self._get(self.cfg.liog_variations_url(pid))
-        items = _as_list(body)
+        items = self._load_variations(pid)
         match = None
         for it in items:
             label = str(it.get("name") or it.get("label") or it.get("title") or "")
             vid = it.get("variation_id") or it.get("id")
             if not vid:
                 continue
-            # Match the denomination as a standalone number in the label.
             if re.search(rf"(?<!\d){re.escape(denom)}(?!\d)", label):
                 match = vid
-                # a label containing "UC" is a stronger signal - prefer it
                 if "uc" in label.lower():
                     break
         if not match:
-            labels = ", ".join(
-                str(it.get("name") or it.get("label") or "?") for it in items[:20]
-            )
+            labels = ", ".join(str(it.get("name") or it.get("label") or "?") for it in items[:20])
             raise LiogCriticalError(
-                f"LioGames variation for {denom} UC not found. Available: {labels}. "
-                f"Set it in LIOG_VARIATIONS."
+                f"Вариация {denom} UC не найдена. Доступно: {labels}. Задай LIOG_VARIATIONS."
             )
         self._variation_cache[denom] = str(match)
-        log.info("[LioGames] Resolved %s UC -> variation_id=%s", denom, match)
+        log.info("[LioGames] %s UC -> variation_id=%s", denom, match)
         return str(match)
 
     def unit_price(self, variation_id: str) -> Optional[float]:
@@ -209,7 +285,9 @@ class LioGamesClient:
             return 0.88
         try:
             pid = self.resolve_product_id()
-            body = self._get(f"{self.cfg.liog_base_url}/products/{pid}/price-matrix")
+            status, body, _ = self._raw_get(f"{self.cfg.liog_base_url}/products/{pid}/price-matrix")
+            if status != 200 or body is None:
+                return None
         except Exception:
             return None
         for it in _as_list(body):
@@ -252,26 +330,44 @@ class LioGamesClient:
         lines = [f"base: {self.cfg.liog_base_url}",
                  f"member_code: {'задан' if self.cfg.liog_member_code else 'ПУСТО'}",
                  f"secret: {'задан' if self.cfg.liog_secret else 'ПУСТО'}",
-                 f"key_id: {self.cfg.liog_key_id or '—'}  sandbox: {self.cfg.liog_sandbox}"]
-        kid = {"X-LIOG-KEY-ID": self.cfg.liog_key_id} if self.cfg.liog_key_id else {}
+                 f"key_id: {self.cfg.liog_key_id or '—'}  sandbox: {self.cfg.liog_sandbox}",
+                 f"product_id(env): {self.cfg.liog_product_id or '—'}  "
+                 f"variations(env): {self.cfg.liog_variations or '—'}"]
 
-        def _probe_get(label, url):
-            try:
-                r = requests.get(url, headers={"Accept": "application/json", **kid},
-                                 timeout=self.cfg.liog_timeout)
-                body = (r.text or "").strip().replace("\n", " ")[:160]
-                lines.append(f"GET {label}: HTTP {r.status_code} | {body}")
-            except Exception as exc:
-                lines.append(f"GET {label}: EXC {exc}")
+        st, _js, snip = self._raw_get(f"{self.cfg.liog_base_url}/ping")
+        lines.append(f"GET /ping: HTTP {st} | {snip}")
+        st, _js, snip = self._raw_get(f"{self.cfg.liog_base_url}/routes")
+        lines.append(f"GET /routes: HTTP {st} | {snip}")
 
-        _probe_get("/ping", f"{self.cfg.liog_base_url}/ping")
-        _probe_get("/products", self.cfg.liog_products_url())
+        # Probe every catalogue source; report which (if any) returns a list.
+        ok_source = None
+        for url in self._catalogue_sources():
+            st, js, snip = self._raw_get(url)
+            n = len(self._items_from(js)) if js is not None else 0
+            lines.append(f"GET {_short(url)}: HTTP {st} | items={n} | {snip if st != 200 else ''}".rstrip())
+            if st == 200 and n and ok_source is None:
+                ok_source = url
+
         # balance is a signed POST - exercises signing end-to-end
         try:
-            bal = self.balance()
-            lines.append(f"POST /balance: OK balance={bal}")
+            lines.append(f"POST /balance: OK balance={self.balance()}")
         except Exception as exc:
             lines.append(f"POST /balance: {type(exc).__name__}: {exc}")
+
+        # If a catalogue is readable, show the resolved PUBG ids so they can be
+        # pinned in .env even if /products stays flaky.
+        try:
+            pid = self.resolve_product_id()
+            lines.append(f"→ product_id={pid}")
+            vs = self._load_variations(pid)
+            shown = []
+            for it in vs[:16]:
+                label = it.get("name") or it.get("label") or it.get("title") or "?"
+                vid = it.get("variation_id") or it.get("id")
+                shown.append(f"{label}={vid}")
+            lines.append("→ variations: " + "; ".join(shown))
+        except Exception as exc:
+            lines.append(f"→ каталог: {type(exc).__name__}: {exc}")
         return "\n".join(lines)
 
     def order_create(self, variation_id: str, client_ref: str, product_id=None) -> Dict[str, Any]:
