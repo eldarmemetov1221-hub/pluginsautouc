@@ -86,8 +86,8 @@ class LioGamesClient:
                 url, data=raw.encode("utf-8"), headers=headers, timeout=self.cfg.liog_timeout
             )
         except Exception as exc:
-            raise LiogTemporaryError(f"LioGames POST failed: {exc}") from exc
-        return self._handle(resp)
+            raise LiogTemporaryError(f"LioGames POST {_short(url)} failed: {exc}") from exc
+        return self._handle(resp, url)
 
     def _get(self, url: str, params: Optional[dict] = None) -> Dict[str, Any]:
         if requests is None:  # pragma: no cover
@@ -98,19 +98,26 @@ class LioGamesClient:
         try:
             resp = requests.get(url, params=params or {}, headers=headers, timeout=self.cfg.liog_timeout)
         except Exception as exc:
-            raise LiogTemporaryError(f"LioGames GET failed: {exc}") from exc
-        return self._handle(resp)
+            raise LiogTemporaryError(f"LioGames GET {_short(url)} failed: {exc}") from exc
+        return self._handle(resp, url)
 
-    def _handle(self, resp) -> Dict[str, Any]:
+    def _handle(self, resp, url: str = "") -> Dict[str, Any]:
         code = resp.status_code
+        where = _short(url)
+        snippet = ""
+        try:
+            snippet = (resp.text or "").strip().replace("\n", " ")[:200]
+        except Exception:
+            pass
         if code in (401, 403):
-            raise LiogCriticalError(f"LioGames auth error HTTP {code}")
+            raise LiogCriticalError(f"LioGames auth error HTTP {code} ({where}): {snippet}")
         if code == 429 or code >= 500:
-            raise LiogTemporaryError(f"LioGames HTTP {code}")
+            raise LiogTemporaryError(f"LioGames HTTP {code} ({where}): {snippet}")
         try:
             body = resp.json()
         except ValueError as exc:
-            raise LiogCriticalError(f"LioGames returned non-JSON body (HTTP {code}): {exc}") from exc
+            raise LiogCriticalError(
+                f"LioGames non-JSON body HTTP {code} ({where}): {snippet or exc}") from exc
         if not isinstance(body, dict):
             return {"ok": True, "data": body}
         # Map documented error codes to the plugin's taxonomy.
@@ -235,6 +242,38 @@ class LioGamesClient:
                     continue
         return None
 
+    def diagnose(self) -> str:
+        """Hit a few endpoints raw (no raising) and report status + body snippet,
+        so a failing /uc_buy can be pinpointed without spending anything."""
+        if self.cfg.liog_mock:
+            return "LioGames в MOCK-режиме (LIOG_SECRET пуст) — реальные запросы не идут."
+        if requests is None:  # pragma: no cover
+            return "requests не установлен."
+        lines = [f"base: {self.cfg.liog_base_url}",
+                 f"member_code: {'задан' if self.cfg.liog_member_code else 'ПУСТО'}",
+                 f"secret: {'задан' if self.cfg.liog_secret else 'ПУСТО'}",
+                 f"key_id: {self.cfg.liog_key_id or '—'}  sandbox: {self.cfg.liog_sandbox}"]
+        kid = {"X-LIOG-KEY-ID": self.cfg.liog_key_id} if self.cfg.liog_key_id else {}
+
+        def _probe_get(label, url):
+            try:
+                r = requests.get(url, headers={"Accept": "application/json", **kid},
+                                 timeout=self.cfg.liog_timeout)
+                body = (r.text or "").strip().replace("\n", " ")[:160]
+                lines.append(f"GET {label}: HTTP {r.status_code} | {body}")
+            except Exception as exc:
+                lines.append(f"GET {label}: EXC {exc}")
+
+        _probe_get("/ping", f"{self.cfg.liog_base_url}/ping")
+        _probe_get("/products", self.cfg.liog_products_url())
+        # balance is a signed POST - exercises signing end-to-end
+        try:
+            bal = self.balance()
+            lines.append(f"POST /balance: OK balance={bal}")
+        except Exception as exc:
+            lines.append(f"POST /balance: {type(exc).__name__}: {exc}")
+        return "\n".join(lines)
+
     def order_create(self, variation_id: str, client_ref: str, product_id=None) -> Dict[str, Any]:
         """Create ONE voucher order. Idempotent on LioGames' side by client_ref."""
         pid = int(product_id or self.resolve_product_id())
@@ -323,6 +362,16 @@ def _as_list(body) -> List[dict]:
         if body.get("product_id") or body.get("variation_id") or body.get("id"):
             return [body]
     return []
+
+
+def _short(url: str) -> str:
+    """The path (and sandbox marker) of a URL, for compact error messages."""
+    if not url:
+        return ""
+    try:
+        return "/" + url.split("://", 1)[1].split("/", 1)[1]
+    except Exception:
+        return url
 
 
 def _maybe_int(v):

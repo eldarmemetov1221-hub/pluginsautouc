@@ -366,6 +366,15 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception:
                 log.exception("Failed to send buy confirmation")
 
+        @bot.message_handler(commands=["uc_buy_ping"])
+        def _uc_buy_ping(message):  # pragma: no cover
+            if not guard(message):
+                return
+            try:
+                reply(message, "🔎 LioGames диагностика:\n" + plugin.liogames.diagnose())
+            except Exception as exc:
+                reply(message, f"Диагностика упала: {exc}")
+
         @bot.message_handler(commands=["uc_buy_status"])
         def _uc_buy_status(message):  # pragma: no cover
             if not guard(message):
