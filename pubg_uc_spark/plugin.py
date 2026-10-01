@@ -375,6 +375,24 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception as exc:
                 reply(message, f"Диагностика упала: {exc}")
 
+        @bot.message_handler(commands=["uc_buy_probe"])
+        def _uc_buy_probe(message):  # pragma: no cover
+            if not guard(message):
+                return
+            import json as _json
+            a = _args(message)
+            if not a:
+                reply(message, "Usage: /uc_buy_probe <liog_order_id>\n"
+                               "Напр.: /uc_buy_probe 536857 (твой прошлый заказ 60 UC) — "
+                               "покажет product_id, variation_id и где лежит код.")
+                return
+            try:
+                body = plugin.liogames.order_status_raw(order_id=a[0], live=True)
+                txt = _json.dumps(body, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                txt = f"{type(exc).__name__}: {exc}"
+            reply(message, f"order-status (live) {a[0]}:\n{txt[:3500]}")
+
         @bot.message_handler(commands=["uc_buy_status"])
         def _uc_buy_status(message):  # pragma: no cover
             if not guard(message):

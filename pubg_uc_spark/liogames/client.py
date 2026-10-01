@@ -389,6 +389,21 @@ class LioGamesClient:
             "raw": body,
         }
 
+    def order_status_raw(self, order_id: str = None, client_ref: str = None,
+                         live: bool = False) -> Dict[str, Any]:
+        """Signed order-status returning the FULL raw body (diagnostics). When
+        ``live`` is True it targets the live endpoint even in sandbox mode, so a
+        past real order can be inspected to discover product/variation ids and
+        the exact field that carries the voucher code."""
+        url = (f"{self.cfg.liog_base_url}/order-status" if live
+               else self.cfg.liog_order_status_url())
+        payload: Dict[str, Any] = {"member_code": self.cfg.liog_member_code}
+        if order_id:
+            payload["order_id"] = order_id
+        if client_ref:
+            payload["client_ref"] = client_ref
+        return self._post(url, payload)
+
     def order_status(self, client_ref: str = None, order_id: str = None) -> Optional[Dict[str, Any]]:
         """Fetch an order's status. Returns the response dict, or None if the
         order does not exist yet (so the caller knows it is safe to create)."""
