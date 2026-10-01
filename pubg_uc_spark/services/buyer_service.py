@@ -198,9 +198,19 @@ class BuyerService:
             return ("Закупок ещё не было.\n"
                     "Запусти: /uc_buy <номинал> <кол-во>  (напр. /uc_buy 60 50)")
         # Reconcile any ORDERED-but-unknown items on demand (no new purchases).
-        if b["status"] in (RUNNING, PAUSED, DONE):
-            self._reconcile(b["id"])
+        if b["status"] in (RUNNING, PAUSED, DONE, STOPPED):
+            recovered = self._reconcile(b["id"])
             b = self._batch(b["id"])
+            # A finished batch that just gained codes -> resend the updated file.
+            if recovered and b["status"] in (DONE, STOPPED):
+                try:
+                    txt, csv = self._write_files(b)
+                    self._send_files(b["admin_id"], b, txt, csv)
+                    self._notify(b["admin_id"],
+                                 f"📦 Закупка #{b['id']}: дозабрал {recovered} код(ов), "
+                                 f"отправил обновлённый файл.")
+                except Exception:
+                    log.exception("[BUY] resend after reconcile failed for #%s", b["id"])
         delivered = self._count(b["id"], DELIVERED)
         failed = self._count(b["id"], FAILED)
         queued = self._count(b["id"], QUEUED)
@@ -364,15 +374,37 @@ class BuyerService:
         self._notify(batch["admin_id"], summary)
         log.info("[BUY] Batch #%s finalized: %s", batch_id, note)
 
-    def _reconcile(self, batch_id: int) -> None:
-        """Re-check ORDERED items via order-status (no new purchases)."""
-        for item in self._items(batch_id, status=ORDERED):
-            final = self._poll_for_code(item["client_ref"], item.get("liog_order_id"))
-            if final.code:
-                self._set_item(item["id"], status=DELIVERED, code=final.code,
-                               liog_order_id=final.order_id or item.get("liog_order_id") or "")
-            elif final.failed:
-                self._set_item(item["id"], status=FAILED, error_message=final.message or "failed")
+    def _reconcile(self, batch_id: int) -> int:
+        """Re-check non-delivered items via order-status (no new purchases).
+
+        Covers ORDERED items AND items we earlier gave up on (FAILED with a
+        recorded liog_order_id) - so a code from a slow order that completes
+        after our poll window is still recovered, never lost. Returns the number
+        of items newly recovered to DELIVERED."""
+        recovered = 0
+        for item in self._items(batch_id):
+            if item["status"] == DELIVERED:
+                continue
+            # Only items that actually reached LioGames can be looked up.
+            if not item.get("liog_order_id") and item["status"] != ORDERED:
+                continue
+            try:
+                body = self.client.order_status(
+                    client_ref=item["client_ref"], order_id=item.get("liog_order_id"))
+            except Exception:
+                continue
+            if body is None:
+                continue
+            code = self.client.extract_code(body)
+            if code:
+                self._set_item(item["id"], status=DELIVERED, code=code,
+                               liog_order_id=self._order_id_from(body) or item.get("liog_order_id") or "",
+                               error_message="")
+                self._passes.pop(item["id"], None)
+                recovered += 1
+            elif self.client.status_is_failed(body) and item["status"] != FAILED:
+                self._set_item(item["id"], status=FAILED, error_message=self._msg_from(body))
+        return recovered
 
     def _write_files(self, batch: dict) -> tuple:
         os.makedirs(self.export_dir, exist_ok=True)

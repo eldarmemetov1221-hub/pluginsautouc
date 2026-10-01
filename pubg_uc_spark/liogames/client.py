@@ -433,7 +433,11 @@ class LioGamesClient:
     @staticmethod
     def status_is_failed(body: Dict[str, Any]) -> bool:
         s = _status_str(body)
-        return s in ("failed", "error", "cancelled", "canceled", "refunded", "rejected")
+        return s in (
+            "failed", "error", "cancelled", "canceled", "rejected", "declined",
+            "refund", "refunded", "partially_refunded", "partial_refund",
+            "chargeback", "void", "voided", "expired", "timeout",
+        )
 
     @staticmethod
     def status_is_terminal_ok(body: Dict[str, Any]) -> bool:

@@ -19,12 +19,14 @@ class FakeClient:
     """Deterministic LioGames stand-in. order_status returns a code once the ref
     has been 'created' (or pre-seeded in ``already``)."""
 
-    def __init__(self, *, balance=9999.0, unit_price=0.0, already=None, fail_refs=None):
+    def __init__(self, *, balance=9999.0, unit_price=0.0, already=None, fail_refs=None,
+                 deliver=True):
         self._balance = balance
         self._unit_price = unit_price
         self.created = set(already or [])
         self.fail_refs = set(fail_refs or [])
         self.create_calls = []
+        self.deliver = deliver          # when False, created orders stay "processing"
 
     def resolve_variation_id(self, denom):
         return f"v{denom}"
@@ -45,7 +47,9 @@ class FakeClient:
         if ref in self.fail_refs:
             return {"ok": True, "data": {"status": "failed", "message": "declined"}}
         if ref in self.created:
-            return {"ok": True, "data": {"status": "completed", "voucher": f"CODE-{ref}"}}
+            if self.deliver:
+                return {"ok": True, "data": {"status": "completed", "voucher": f"CODE-{ref}"}}
+            return {"ok": True, "data": {"status": "processing"}}  # exists, no code yet
         return None
 
     def extract_code(self, body):
@@ -156,6 +160,31 @@ def test_failed_item_is_recorded_not_fatal(tmp_path):
     assert b["status"] == BS.DONE
     assert svc._count(bid, BS.DELIVERED) == 2
     assert svc._count(bid, BS.FAILED) == 1
+    db.close()
+
+
+def test_reconcile_recovers_late_completed_order(tmp_path):
+    # Order is created but delivery is slow: it ends up FAILED ("still processing"),
+    # the batch finalizes with 0 codes, THEN the order completes - /uc_buy_status
+    # must recover the code and resend the file (money already spent, not lost).
+    client = FakeClient(deliver=False)
+    c, db, svc, notified, files = _mk(tmp_path, client)
+    bid = svc.create_pending("60", 1, admin_id="A")
+    svc.confirm(bid)
+    _drain(svc, bid)
+    assert svc._batch(bid)["status"] == BS.DONE
+    assert svc._count(bid, BS.DELIVERED) == 0
+    assert svc._count(bid, BS.FAILED) == 1          # gave up after reconcile passes
+    assert len(client.create_calls) == 1            # bought exactly once
+    files_before = len(files)
+
+    # Now the slow order completes; a status check recovers the code.
+    client.deliver = True
+    txt = svc.status_text(bid)
+    assert svc._count(bid, BS.DELIVERED) == 1
+    assert len(files) == files_before + 1           # updated file resent
+    with open(files[-1][2]) as fh:
+        assert any(ln.strip().startswith("CODE-") for ln in fh)
     db.close()
 
 

@@ -50,6 +50,14 @@ def test_extract_code_ignores_ids_and_status_words():
     assert code not in ("575551", "66599", "534124", "536857", "SUCCESS", "completed")
 
 
+def test_refund_and_other_terminal_failures_detected():
+    c = _client()
+    for s in ("refunded", "refund", "declined", "void", "expired", "cancelled", "rejected"):
+        body = {"data": {"status": s}}
+        assert c.status_is_failed(body) is True, s
+        assert c.status_is_terminal_ok(body) is False, s
+
+
 def test_processing_order_has_no_code_yet():
     c = _client()
     assert c.extract_code(PROCESSING) is None
