@@ -28,7 +28,6 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -53,17 +52,6 @@ QUEUED = "QUEUED"
 ORDERED = "ORDERED"
 DELIVERED = "DELIVERED"
 FAILED = "FAILED"
-
-_MAX_RECONCILE_PASSES = 3
-
-
-@dataclass
-class _PollResult:
-    code: Optional[str] = None
-    order_id: Optional[str] = None
-    failed: bool = False
-    message: str = ""
-
 
 class BuyerService:
     def __init__(
@@ -262,96 +250,109 @@ class BuyerService:
 
     # ------------------------------------------------------------------ #
     # One processing step (also the inline entrypoint for tests)
+    #
+    # Two phases, so we never block the next purchase on the previous order's
+    # delivery: (1) create every queued order, paced by the ~60s rate limit;
+    # (2) once all are created, collect their codes in parallel by polling
+    # order-status (no new purchases), then finalise.
     # ------------------------------------------------------------------ #
     def run_once(self, batch_id: int) -> bool:
-        """Process the next pending item of a RUNNING batch. Returns True if a
-        NEW purchase was issued (caller paces by the buy interval)."""
+        """One worker tick. Returns True if a NEW purchase was issued (caller
+        then paces by the buy interval before the next create)."""
         batch = self._batch(batch_id)
         if not batch or batch["status"] != RUNNING:
             return False
-        item = self._next_pending_item(batch_id)
-        if item is None:
-            self._finalize(batch)
-            return False
-        try:
-            issued_new = self._process_item(batch, item)
-        except LiogInsufficientBalance as exc:
-            self._pause_batch(batch, str(exc))
-            return False
-        except LiogCriticalError as exc:
-            self._set_item(item["id"], status=FAILED, error_message=str(exc))
-            log.error("[BUY] Item #%s critical: %s", item["id"], exc)
-            self._notify(batch["admin_id"],
-                         f"⚠️ Закупка #{batch_id}: ошибка на позиции {item['seq']}: {exc}")
-            return False
-        except LiogTemporaryError as exc:
-            log.warning("[BUY] Item #%s temporary: %s", item["id"], exc)
-            self._sleep(min(self.cfg.liog_buy_interval, 15))
+
+        # Phase 1 - create the next queued order (do NOT wait for delivery).
+        item = self._next_queued_item(batch_id)
+        if item is not None:
+            try:
+                created_new = self._create_item(batch, item)
+            except LiogInsufficientBalance as exc:
+                self._pause_batch(batch, str(exc))
+                return False
+            except LiogCriticalError as exc:
+                self._set_item(item["id"], status=FAILED, error_message=str(exc))
+                log.error("[BUY] create #%s critical: %s", item["id"], exc)
+                self._notify(batch["admin_id"],
+                             f"⚠️ Закупка #{batch_id}: позиция {item['seq']}: {exc}")
+                return False
+            except LiogTemporaryError as exc:
+                log.warning("[BUY] create #%s temporary: %s", item["id"], exc)
+                self._sleep(min(self.cfg.liog_buy_interval, 15))
+                return False
+            if created_new and self.async_mode:
+                # 60s is the floor between order-create calls; +1s safety margin.
+                self._interruptible_sleep(self.cfg.liog_buy_interval + 1.0)
+            return created_new
+
+        # Phase 2 - everything is created; collect codes in parallel.
+        if self._count(batch_id, ORDERED) > 0:
+            self._collect_pass(batch)
+            if self._count(batch_id, ORDERED) > 0 and self.async_mode:
+                self._interruptible_sleep(max(1.0, self.cfg.liog_poll_interval))
             return False
 
-        self._maybe_progress(batch_id)
-        if issued_new and self.async_mode:
-            self._interruptible_sleep(self.cfg.liog_buy_interval)
-        return issued_new
+        # Phase 3 - nothing left queued or in-flight; finalise + send file.
+        self._finalize(batch)
+        return False
 
-    def _process_item(self, batch: dict, item: dict) -> bool:
-        """Buy (or reconcile) one unit. Returns True if a new order was created."""
+    def _create_item(self, batch: dict, item: dict) -> bool:
+        """Create ONE order (no delivery wait). Returns True if a NEW purchase
+        was actually issued (so the caller paces for the rate limit)."""
         if item["status"] == DELIVERED:
             return False
         cref = item["client_ref"]
 
-        # Idempotency: does this order already exist on LioGames?
-        existing = self.client.order_status(client_ref=cref)
-        issued_new = False
-        if existing is None:
-            # Balance guard (best-effort) before spending.
-            if batch.get("unit_price"):
-                bal = self.client.balance()
-                if bal is not None and bal + 1e-9 < float(batch["unit_price"]):
-                    raise LiogInsufficientBalance(
-                        f"баланс {bal} < цена {batch['unit_price']}")
-            # Mark ORDERED *before* the call so a crash is reconciled, not re-bought.
-            self._set_item(item["id"], status=ORDERED)
-            created = self.client.order_create(batch["variation_id"], cref)
-            self._set_item(item["id"], liog_order_id=created.get("order_id") or "")
-            item["liog_order_id"] = created.get("order_id") or ""
-            issued_new = True
+        # Idempotency: if this client_ref already exists on LioGames (e.g. a
+        # restart after we created it), never buy again - adopt the existing one.
+        try:
+            existing = self.client.order_status(client_ref=cref)
+        except Exception:
+            existing = None
+        if existing is not None:
+            code = self.client.extract_code(existing)
+            if code:
+                self._set_item(item["id"], status=DELIVERED, code=code,
+                               liog_order_id=self._order_id_from(existing) or "", error_message="")
+            elif self.client.status_is_failed(existing):
+                self._set_item(item["id"], status=FAILED, error_message=self._msg_from(existing))
+            else:
+                self._set_item(item["id"], status=ORDERED,
+                               liog_order_id=self._order_id_from(existing)
+                               or item.get("liog_order_id") or "")
+            return False  # not a new purchase
 
-        final = self._poll_for_code(cref, item.get("liog_order_id"))
-        if final.code:
-            self._set_item(item["id"], status=DELIVERED, code=final.code,
-                           liog_order_id=final.order_id or item.get("liog_order_id") or "")
-            self._passes.pop(item["id"], None)
-        elif final.failed:
-            self._set_item(item["id"], status=FAILED, error_message=final.message or "failed")
-            self._passes.pop(item["id"], None)
-        else:
-            # Not terminal yet: count the pass, give up tracking after a few so the
-            # batch can finalize (the order_id is recorded for manual lookup).
-            n = self._passes.get(item["id"], 0) + 1
-            self._passes[item["id"]] = n
-            if n >= _MAX_RECONCILE_PASSES:
+        # Balance guard (best-effort) before spending.
+        if batch.get("unit_price"):
+            bal = self.client.balance()
+            if bal is not None and bal + 1e-9 < float(batch["unit_price"]):
+                raise LiogInsufficientBalance(f"баланс {bal} < цена {batch['unit_price']}")
+
+        # Mark ORDERED *before* the call so a crash is reconciled, not re-bought.
+        self._set_item(item["id"], status=ORDERED)
+        created = self.client.order_create(batch["variation_id"], cref)
+        self._set_item(item["id"], liog_order_id=created.get("order_id") or "")
+        return True
+
+    def _collect_pass(self, batch: dict) -> None:
+        """One parallel collection pass over in-flight orders (no purchases)."""
+        batch_id = batch["id"]
+        recovered = self._reconcile(batch_id)
+        # Give up on orders stuck far past the poll budget (money already spent;
+        # the order_id is kept so /uc_buy_status can still recover them later).
+        budget = max(1, int(self.cfg.liog_poll_attempts))
+        for it in self._items(batch_id, status=ORDERED):
+            n = self._passes.get(it["id"], 0) + 1
+            self._passes[it["id"]] = n
+            if n >= budget:
                 self._set_item(
-                    item["id"], status=FAILED,
-                    error_message=f"still processing after {n} passes; check LioGames "
-                                  f"order {item.get('liog_order_id') or cref}")
-                self._passes.pop(item["id"], None)
-        return issued_new
-
-    def _poll_for_code(self, client_ref: str, order_id: str = None) -> _PollResult:
-        attempts = max(1, int(self.cfg.liog_poll_attempts))
-        for i in range(attempts):
-            body = self.client.order_status(client_ref=client_ref, order_id=order_id)
-            if body is not None:
-                code = self.client.extract_code(body)
-                if code:
-                    oid = self._order_id_from(body) or order_id
-                    return _PollResult(code=code, order_id=oid)
-                if self.client.status_is_failed(body):
-                    return _PollResult(failed=True, message=self._msg_from(body))
-            if i < attempts - 1:
-                self._sleep(self.cfg.liog_poll_interval)
-        return _PollResult()  # not terminal within budget
+                    it["id"], status=FAILED,
+                    error_message=f"не выдан за отведённое время; проверь LioGames "
+                                  f"заказ {it.get('liog_order_id') or it['client_ref']}")
+                self._passes.pop(it["id"], None)
+        if recovered:
+            self._maybe_progress(batch_id)
 
     # ------------------------------------------------------------------ #
     # Finalisation & reconciliation
@@ -509,19 +510,13 @@ class BuyerService:
         self.db.execute(f"UPDATE buy_batches SET {cols} WHERE id = ?",
                         tuple(fields.values()) + (batch_id,))
 
-    def _next_pending_item(self, batch_id) -> Optional[dict]:
-        # QUEUED first (new buys), then ORDERED that haven't exhausted reconcile.
+    def _next_queued_item(self, batch_id) -> Optional[dict]:
+        """The next not-yet-created item (create phase). ORDERED items are handled
+        separately in the parallel collection phase."""
         row = self.db.query_one(
             "SELECT * FROM buy_items WHERE batch_id = ? AND status = ? ORDER BY seq ASC LIMIT 1",
             (batch_id, QUEUED))
-        if row:
-            return dict(row)
-        for r in self.db.query_all(
-                "SELECT * FROM buy_items WHERE batch_id = ? AND status = ? ORDER BY seq ASC",
-                (batch_id, ORDERED)):
-            if self._passes.get(r["id"], 0) < _MAX_RECONCILE_PASSES:
-                return dict(r)
-        return None
+        return dict(row) if row else None
 
     def _items(self, batch_id, status: str = None) -> list:
         if status:

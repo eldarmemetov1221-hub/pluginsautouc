@@ -44,13 +44,13 @@ class FakeClient:
 
     def order_status(self, client_ref=None, order_id=None):
         ref = client_ref or ""
+        if ref not in self.created:
+            return None                      # order doesn't exist yet -> safe to create
         if ref in self.fail_refs:
             return {"ok": True, "data": {"status": "failed", "message": "declined"}}
-        if ref in self.created:
-            if self.deliver:
-                return {"ok": True, "data": {"status": "completed", "voucher": f"CODE-{ref}"}}
-            return {"ok": True, "data": {"status": "processing"}}  # exists, no code yet
-        return None
+        if self.deliver:
+            return {"ok": True, "data": {"status": "completed", "voucher": f"CODE-{ref}"}}
+        return {"ok": True, "data": {"status": "processing"}}  # exists, no code yet
 
     def extract_code(self, body):
         data = body.get("data", body)
