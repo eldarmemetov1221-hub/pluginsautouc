@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS buy_items (
     seq               INTEGER NOT NULL,
     client_ref        TEXT NOT NULL UNIQUE,
     status            TEXT NOT NULL,       -- QUEUED/ORDERED/DELIVERED/FAILED
+    denom             TEXT,                -- per-item denomination (multi-denom batches)
+    variation_id      TEXT,                -- per-item LioGames variation id
     liog_order_id     TEXT,
     code              TEXT,
     error_message     TEXT,
@@ -142,6 +144,18 @@ class Database:
             # calc for those until they age out.
             self._conn.execute("ALTER TABLE orders ADD COLUMN cost REAL DEFAULT 0")
             log.info("Migrated: added orders.cost column")
+        # buy_items gained per-item denom/variation_id for multi-denomination
+        # batches; add them to DBs that created buy_items before this change.
+        try:
+            bcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(buy_items)")}
+        except Exception:
+            bcols = set()
+        if bcols and "denom" not in bcols:
+            self._conn.execute("ALTER TABLE buy_items ADD COLUMN denom TEXT")
+            log.info("Migrated: added buy_items.denom column")
+        if bcols and "variation_id" not in bcols:
+            self._conn.execute("ALTER TABLE buy_items ADD COLUMN variation_id TEXT")
+            log.info("Migrated: added buy_items.variation_id column")
 
     @property
     def lock(self) -> threading.RLock:

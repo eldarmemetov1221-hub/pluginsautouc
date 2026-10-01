@@ -188,6 +188,29 @@ def test_reconcile_recovers_late_completed_order(tmp_path):
     db.close()
 
 
+def test_multi_denomination_batch(tmp_path):
+    """A mixed batch buys each denomination's quantity and tags codes by denom."""
+    client = FakeClient()
+    c, db, svc, notified, files = _mk(tmp_path, client)
+    bid = svc.create_pending_multi([("60", 2), ("325", 1)], admin_id="A")
+    svc.confirm(bid)
+    _drain(svc, bid)
+
+    b = svc._batch(bid)
+    assert b["status"] == BS.DONE
+    assert b["denom"] == "MIX"
+    assert svc._count(bid, BS.DELIVERED) == 3          # 2x60 + 1x325
+    assert len(client.create_calls) == 3
+    # per-item denom is recorded
+    denoms = sorted(it["denom"] for it in svc._items(bid))
+    assert denoms == ["325", "60", "60"]
+    # the mixed .txt labels each code with its denomination
+    with open(files[-1][2]) as fh:
+        body = fh.read()
+    assert "60 UC:" in body and "325 UC:" in body
+    db.close()
+
+
 def test_qty_cap_rejected(tmp_path):
     client = FakeClient()
     c, db, svc, notified, files = _mk(tmp_path, client)

@@ -105,10 +105,33 @@ class BuyerService:
 
     def create_pending(self, denom: str, qty: int, admin_id, variation_id: str = None,
                        unit_price: float = 0.0) -> int:
-        """Create a PENDING_CONFIRM batch with QUEUED items. Returns batch_id."""
+        """Create a single-denomination PENDING_CONFIRM batch. Returns batch_id."""
         qty = self._validate_qty(qty)
         if variation_id is None:
             variation_id = self.client.resolve_variation_id(str(denom))
+        return self._create_batch(str(denom), [(str(denom), qty, str(variation_id))],
+                                  admin_id, unit_price=float(unit_price or 0))
+
+    def create_pending_multi(self, specs: list, admin_id) -> int:
+        """Create ONE mixed batch from [(denom, qty), ...]. Resolves each
+        variation up front; items carry their own denom/variation_id. Returns
+        batch_id. The combined file holds every code; the .csv keeps the denom."""
+        norm = []
+        total_qty = 0
+        for denom, qty in specs:
+            q = self._validate_qty(qty)
+            vid = self.client.resolve_variation_id(str(denom))
+            norm.append((str(denom), q, str(vid)))
+            total_qty += q
+        if total_qty > self.cfg.liog_max_batch:
+            raise LiogCriticalError(
+                f"Суммарно слишком много ({total_qty}). Лимит партии: {self.cfg.liog_max_batch}.")
+        return self._create_batch("MIX", norm, admin_id, unit_price=0.0)
+
+    def _create_batch(self, batch_denom: str, specs: list, admin_id,
+                      unit_price: float = 0.0) -> int:
+        """specs = [(denom, qty, variation_id), ...]. One batch, QUEUED items."""
+        total_qty = sum(q for _d, q, _v in specs)
         now = _now()
         with self.db.lock:
             cur = self.db.conn.execute(
@@ -116,23 +139,56 @@ class BuyerService:
                    (denom, variation_id, quantity, status, unit_price, admin_id, note,
                     created_at, updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?)""",
-                (str(denom), str(variation_id), qty, PENDING_CONFIRM,
-                 float(unit_price or 0), str(admin_id or ""), "", now, now),
+                (batch_denom, specs[0][2] if len(specs) == 1 else "", total_qty,
+                 PENDING_CONFIRM, float(unit_price or 0), str(admin_id or ""), "", now, now),
             )
             batch_id = cur.lastrowid
-            rows = [
-                (batch_id, seq, f"UCBUY-{batch_id}-{seq}", QUEUED, now, now)
-                for seq in range(1, qty + 1)
-            ]
+            rows = []
+            seq = 1
+            for denom, qty, vid in specs:
+                for _ in range(qty):
+                    rows.append((batch_id, seq, f"UCBUY-{batch_id}-{seq}", QUEUED,
+                                 denom, vid, now, now))
+                    seq += 1
             self.db.conn.executemany(
                 """INSERT INTO buy_items
-                   (batch_id, seq, client_ref, status, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?)""",
+                   (batch_id, seq, client_ref, status, denom, variation_id,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 rows,
             )
             self.db.conn.commit()
-        log.info("[BUY] Batch #%s created: %s UC x%s (pending confirm)", batch_id, denom, qty)
+        log.info("[BUY] Batch #%s created: %s x%s (pending confirm)",
+                 batch_id, batch_denom, total_qty)
         return batch_id
+
+    def estimate_multi(self, specs: list) -> dict:
+        """Confirmation data for a multi-denomination order: per-line price and a
+        grand total, plus the live balance. specs = [(denom, qty), ...]."""
+        lines = []
+        total = 0.0
+        total_known = True
+        for denom, qty in specs:
+            q = self._validate_qty(qty)
+            vid = self.client.resolve_variation_id(str(denom))
+            price = None
+            try:
+                price = self.client.unit_price(vid)
+            except Exception:
+                pass
+            if price is None:
+                total_known = False
+            else:
+                total += price * q
+            lines.append({"denom": str(denom), "qty": q, "unit_price": price,
+                          "variation_id": vid})
+        balance = None
+        try:
+            balance = self.client.balance()
+        except Exception:
+            pass
+        return {"lines": lines, "total": total if total_known else None,
+                "balance": balance, "qty": sum(l["qty"] for l in lines)}
 
     def confirm(self, batch_id: int) -> str:
         b = self._batch(batch_id)
@@ -143,7 +199,9 @@ class BuyerService:
         self._set_batch(batch_id, status=RUNNING)
         self._ensure_worker()
         self._wake.set()
-        return (f"✅ Запущена закупка #{batch_id}: {b['denom']} UC × {b['quantity']} шт.\n"
+        label = (f"{b['quantity']} шт. (несколько номиналов)" if str(b["denom"]).upper() == "MIX"
+                 else f"{b['denom']} UC × {b['quantity']} шт.")
+        return (f"✅ Запущена закупка #{batch_id}: {label}\n"
                 f"Покупаю по одной (~{int(self.cfg.liog_buy_interval)}с между заказами). "
                 f"Пришлю файл, когда закончу. Прогресс: /uc_buy_status")
 
@@ -180,6 +238,33 @@ class BuyerService:
         left = self._count(b["id"], QUEUED) + self._count(b["id"], ORDERED)
         return f"▶️ Закупка #{b['id']} возобновлена. Осталось купить/дозабрать: {left}."
 
+    def account_summary(self) -> str:
+        """Short LioGames account panel for the menu: balance + mode + last batch."""
+        bal = None
+        try:
+            bal = self.client.balance()
+        except Exception:
+            pass
+        mc = getattr(self.cfg, "liog_member_code", "") or ""
+        mc_mask = (mc[:4] + "…" + mc[-3:]) if len(mc) > 8 else (mc or "—")
+        sandbox = getattr(self.cfg, "liog_sandbox", False)
+        mock = getattr(self.cfg, "liog_mock", False)
+        lines = [
+            "🏦 LioGames",
+            f"💵 Баланс: {('$' + format(bal, 'g')) if bal is not None else '— (не прочитан)'}",
+            f"🆔 Member: {mc_mask}",
+        ]
+        if mock:
+            lines.append("⚠️ MOCK-режим (LIOG_SECRET пуст) — коды ненастоящие")
+        elif sandbox:
+            lines.append("⚠️ SANDBOX — заказы без реального списания/выдачи")
+        b = self._active_batch() or self._paused_batch() or self._latest_batch()
+        if b:
+            d = self._count(b["id"], DELIVERED)
+            head = "микс" if str(b["denom"]).upper() == "MIX" else f"{b['denom']} UC"
+            lines.append(f"📦 Последняя закупка #{b['id']} ({head}): {b['status']} {d}/{b['quantity']}")
+        return "\n".join(lines)
+
     def status_text(self, batch_id: int = None) -> str:
         b = self._batch(batch_id) if batch_id else self._latest_batch()
         if not b:
@@ -203,8 +288,9 @@ class BuyerService:
         failed = self._count(b["id"], FAILED)
         queued = self._count(b["id"], QUEUED)
         ordered = self._count(b["id"], ORDERED)
+        head = "несколько номиналов" if str(b["denom"]).upper() == "MIX" else f"{b['denom']} UC"
         lines = [
-            f"🧾 Закупка #{b['id']} — {b['denom']} UC",
+            f"🧾 Закупка #{b['id']} — {head}",
             f"Статус: {b['status']}" + (f" ({b['note']})" if b.get("note") else ""),
             f"Всего: {b['quantity']} | ✅ куплено: {delivered} | ⏳ в очереди: {queued} | "
             f"🔄 в обработке: {ordered} | ❌ ошибок: {failed}",
@@ -331,7 +417,8 @@ class BuyerService:
 
         # Mark ORDERED *before* the call so a crash is reconciled, not re-bought.
         self._set_item(item["id"], status=ORDERED)
-        created = self.client.order_create(batch["variation_id"], cref)
+        variation_id = item.get("variation_id") or batch.get("variation_id")
+        created = self.client.order_create(variation_id, cref)
         self._set_item(item["id"], liog_order_id=created.get("order_id") or "")
         return True
 
@@ -409,22 +496,28 @@ class BuyerService:
 
     def _write_files(self, batch: dict) -> tuple:
         os.makedirs(self.export_dir, exist_ok=True)
-        base = f"liog_{batch['denom']}uc_batch{batch['id']}"
+        tag = str(batch["denom"]).lower()
+        base = f"liog_{tag}uc_batch{batch['id']}" if tag != "mix" else f"liog_mix_batch{batch['id']}"
         txt_path = os.path.join(self.export_dir, base + ".txt")
         csv_path = os.path.join(self.export_dir, base + ".csv")
         items = self._items(batch["id"])
+        is_mix = str(batch["denom"]).upper() == "MIX"
         with open(txt_path, "w", encoding="utf-8") as fh:
             for it in items:
                 if it["status"] == DELIVERED and it["code"]:
-                    fh.write(it["code"] + "\n")
+                    # For a mixed batch, prefix the denom so codes stay identifiable.
+                    if is_mix:
+                        fh.write(f"{it.get('denom') or '?'} UC: {it['code']}\n")
+                    else:
+                        fh.write(it["code"] + "\n")
         import csv as _csv
         with open(csv_path, "w", encoding="utf-8", newline="") as fh:
             w = _csv.writer(fh)
             w.writerow(["seq", "denom", "status", "code", "liog_order_id", "client_ref", "error"])
             for it in items:
-                w.writerow([it["seq"], batch["denom"], it["status"], it.get("code") or "",
-                            it.get("liog_order_id") or "", it["client_ref"],
-                            it.get("error_message") or ""])
+                w.writerow([it["seq"], it.get("denom") or batch["denom"], it["status"],
+                            it.get("code") or "", it.get("liog_order_id") or "",
+                            it["client_ref"], it.get("error_message") or ""])
         return txt_path, csv_path
 
     # ------------------------------------------------------------------ #

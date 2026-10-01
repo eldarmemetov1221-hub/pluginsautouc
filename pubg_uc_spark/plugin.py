@@ -323,48 +323,86 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             )
             return kb
 
-        @bot.message_handler(commands=["uc_buy"])
-        def _uc_buy(message):  # pragma: no cover - requires telebot
-            if not guard(message):
-                return
-            a = _args(message)
-            if len(a) < 2 or not a[1].isdigit():
-                reply(message, "Usage: /uc_buy <номинал> <кол-во>\nНапр.: /uc_buy 60 50")
-                return
-            denom, qty = a[0], int(a[1])
+        def _eta(qty):
+            mins = int(cfg.liog_buy_interval) * qty // 60
+            return f"≈{mins} мин на {qty} шт." if mins else f"~{int(cfg.liog_buy_interval)}с"
+
+        def _start_single(chat_id, denom, qty):  # pragma: no cover - requires telebot
             try:
                 est = plugin.buyer.estimate(denom, qty)
                 batch_id = plugin.buyer.create_pending(
-                    denom, qty, getattr(message.chat, "id", None),
-                    variation_id=est["variation_id"], unit_price=est.get("unit_price") or 0.0)
+                    denom, qty, chat_id, variation_id=est["variation_id"],
+                    unit_price=est.get("unit_price") or 0.0)
             except Exception as exc:
-                reply(message, f"Не получилось подготовить закупку: {exc}")
+                bot.send_message(chat_id, f"Не получилось подготовить закупку: {exc}", parse_mode="")
                 return
-            up = est.get("unit_price")
-            total = est.get("total")
-            bal = est.get("balance")
-            card = [
-                f"🛒 Закупка LioGames — подтверждение (#{batch_id})",
-                f"Товар: PUBG {denom} UC (ваучер-коды)",
-                f"Количество: {qty} шт.",
-            ]
+            up, total, bal = est.get("unit_price"), est.get("total"), est.get("balance")
+            card = [f"🛒 Закупка LioGames — подтверждение (#{batch_id})",
+                    f"Товар: PUBG {denom} UC (ваучер-коды)", f"Количество: {qty} шт."]
             if up is not None:
                 card.append(f"Цена за шт.: ${up:g}")
             if total is not None:
                 card.append(f"Итого: ${total:g}")
             if bal is not None:
-                card.append(f"Баланс кошелька: ${bal:g}")
+                card.append(f"Баланс: ${bal:g}")
                 if total is not None and bal < total:
-                    card.append("⚠️ Баланса не хватает на всю партию — закупка встанет на паузу, "
-                                "когда деньги кончатся (пополнишь — /uc_buy_resume).")
-            card.append(f"\n⏱ Покупаю по одной, ~{int(cfg.liog_buy_interval)}с между заказами "
-                        f"(≈{int(cfg.liog_buy_interval)*qty//60} мин на {qty} шт.).")
-            card.append("Нажми «✅ Подтвердить», чтобы начать. Спишется только после подтверждения.")
+                    card.append("⚠️ Баланса не хватит на всю партию — встанет на паузу, "
+                                "пополнишь → /uc_buy_resume.")
+            card.append(f"\n⏱ По одной, ~{int(cfg.liog_buy_interval)}с между заказами ({_eta(qty)}).")
+            card.append("«✅ Подтвердить» — начать. Спишется только после подтверждения.")
+            bot.send_message(chat_id, "\n".join(card),
+                             reply_markup=_buy_confirm_markup(batch_id), parse_mode="")
+
+        def _start_multi(chat_id, specs):  # pragma: no cover - requires telebot
             try:
-                bot.send_message(message.chat.id, "\n".join(card),
-                                 reply_markup=_buy_confirm_markup(batch_id), parse_mode="")
-            except Exception:
-                log.exception("Failed to send buy confirmation")
+                est = plugin.buyer.estimate_multi(specs)
+                batch_id = plugin.buyer.create_pending_multi(specs, chat_id)
+            except Exception as exc:
+                bot.send_message(chat_id, f"Не получилось подготовить закупку: {exc}", parse_mode="")
+                return
+            total, bal, qty = est.get("total"), est.get("balance"), est.get("qty")
+            card = [f"🛒 Закупка LioGames — подтверждение (#{batch_id})", "Несколько номиналов:"]
+            for ln in est["lines"]:
+                price = f" — ${ln['unit_price']:g}/шт" if ln.get("unit_price") is not None else ""
+                card.append(f"  • {ln['denom']} UC × {ln['qty']}{price}")
+            card.append(f"Всего: {qty} шт.")
+            if total is not None:
+                card.append(f"Итого: ${total:g}")
+            if bal is not None:
+                card.append(f"Баланс: ${bal:g}")
+                if total is not None and bal < total:
+                    card.append("⚠️ Баланса не хватит на всё — встанет на паузу (/uc_buy_resume).")
+            card.append(f"\n⏱ По одной, ~{int(cfg.liog_buy_interval)}с между заказами ({_eta(qty)}).")
+            card.append("«✅ Подтвердить» — начать.")
+            bot.send_message(chat_id, "\n".join(card),
+                             reply_markup=_buy_confirm_markup(batch_id), parse_mode="")
+
+        def _parse_multi(text):
+            import re
+            specs = []
+            for part in re.split(r"[,\n;]+", str(text or "")):
+                nums = re.findall(r"\d+", part)
+                if len(nums) >= 2:
+                    specs.append((nums[0], int(nums[1])))
+            return specs
+
+        @bot.message_handler(commands=["uc_buy"])
+        def _uc_buy(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = _args(message)
+            # Multi form: /uc_buy 60x50, 325x10   OR   single: /uc_buy 60 50
+            joined = " ".join(a)
+            if ("," in joined) or ("x" in joined.lower()) or ("х" in joined.lower()):
+                specs = _parse_multi(joined.replace("x", " ").replace("X", " ").replace("х", " "))
+                if specs:
+                    _start_multi(message.chat.id, specs)
+                    return
+            if len(a) < 2 or not a[1].isdigit():
+                reply(message, "Usage: /uc_buy <номинал> <кол-во>\n"
+                               "Напр.: /uc_buy 60 50  или  /uc_buy 60x50, 325x10")
+                return
+            _start_single(message.chat.id, a[0], int(a[1]))
 
         @bot.message_handler(commands=["uc_buy_ping"])
         def _uc_buy_ping(message):  # pragma: no cover
@@ -443,6 +481,59 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception:
                 log.exception("Buy callback failed")
 
+        # ---- LioGames buy menu (inside the root menu) ---- #
+        def _liog_denoms():
+            keys = list((getattr(cfg, "liog_variations", {}) or {}).keys())
+            try:
+                return sorted(keys, key=lambda x: int(x))
+            except Exception:
+                return keys
+
+        def _liog_text():
+            return (plugin.buyer.account_summary()
+                    + "\n\nВыбери номинал для закупки, «🧮 Несколько» для микса, "
+                      "или «📊 Статус».")
+
+        def _liog_markup():
+            from telebot import types
+            kb = types.InlineKeyboardMarkup(row_width=3)
+            btns = [types.InlineKeyboardButton(f"{d} UC", callback_data=f"ucfin:liogbuy:{d}")
+                    for d in _liog_denoms()]
+            for i in range(0, len(btns), 3):
+                kb.add(*btns[i:i + 3])
+            kb.add(types.InlineKeyboardButton("🧮 Несколько номиналов", callback_data="ucfin:liogmulti"))
+            kb.add(
+                types.InlineKeyboardButton("📊 Статус", callback_data="ucfin:liogstatus"),
+                types.InlineKeyboardButton("⏹ Стоп", callback_data="ucfin:liogstop"),
+                types.InlineKeyboardButton("▶️ Продолжить", callback_data="ucfin:liogresume"),
+            )
+            kb.add(
+                types.InlineKeyboardButton("🔄 Обновить", callback_data="ucfin:liog"),
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
+            )
+            return kb
+
+        def _liog_qty_step(denom):  # pragma: no cover - requires telebot
+            def _step(message):
+                if not guard(message):
+                    return
+                import re
+                m = re.search(r"\d+", getattr(message, "text", "") or "")
+                if not m:
+                    reply(message, "Нужно число. Отменено.")
+                    return
+                _start_single(message.chat.id, denom, int(m.group(0)))
+            return _step
+
+        def _liog_multi_step(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            specs = _parse_multi(getattr(message, "text", ""))
+            if not specs:
+                reply(message, "Не разобрал. Формат: 60x50, 325x10. Отменено.")
+                return
+            _start_multi(message.chat.id, specs)
+
         @bot.message_handler(commands=["uc_finance"])
         def _finance(message):  # pragma: no cover - requires telebot
             if not guard(message):
@@ -516,6 +607,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             toggle = ("⏸ Выключить автовыдачу" if _auto_on()
                       else "▶️ Включить автовыдачу")
             kb.add(types.InlineKeyboardButton(toggle, callback_data="ucfin:toggle"))
+            kb.add(types.InlineKeyboardButton("🛒 Закупка кодов (LioGames)", callback_data="ucfin:liog"))
             kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
             return kb
 
@@ -525,6 +617,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     f"Автовыдача: {state}\n\n"
                     "📊 Статистика — прибыль, выручка, себестоимость, цены\n"
                     "📦 Сток — остатки Spark и каких пачек не хватает\n"
+                    "🛒 Закупка кодов — купить ваучеры PUBG UC на LioGames\n"
                     "⏸/▶️ — вкл/выкл автоматическое начисление")
 
         def _back_markup():
@@ -754,6 +847,42 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                                               reply_markup=_root_markup())
                     except Exception:
                         _show_root(chat_id)
+                    return
+                if data == "ucfin:liog":
+                    bot.answer_callback_query(call.id, "Загружаю…")
+                    try:
+                        bot.edit_message_text(_liog_text(), chat_id, call.message.message_id,
+                                              reply_markup=_liog_markup())
+                    except Exception:
+                        bot.send_message(chat_id, _liog_text(), reply_markup=_liog_markup())
+                    return
+                if data.startswith("ucfin:liogbuy:"):
+                    denom = data.split(":", 2)[2]
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(chat_id, f"Сколько штук {denom} UC купить? (число)",
+                                         reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, _liog_qty_step(denom))
+                    return
+                if data == "ucfin:liogmulti":
+                    bot.answer_callback_query(call.id)
+                    m = bot.send_message(
+                        chat_id, "Введи номиналы и количество, напр.:\n60x50, 325x10, 8100x2",
+                        reply_markup=_force_reply())
+                    bot.register_next_step_handler(m, _liog_multi_step)
+                    return
+                if data == "ucfin:liogstatus":
+                    bot.answer_callback_query(call.id)
+                    try:
+                        bot.edit_message_text(plugin.buyer.status_text(), chat_id,
+                                              call.message.message_id, reply_markup=_liog_markup())
+                    except Exception:
+                        bot.send_message(chat_id, plugin.buyer.status_text(), reply_markup=_liog_markup())
+                    return
+                if data in ("ucfin:liogstop", "ucfin:liogresume"):
+                    msg = (plugin.buyer.stop() if data == "ucfin:liogstop"
+                           else plugin.buyer.resume())
+                    bot.answer_callback_query(call.id)
+                    bot.send_message(chat_id, msg, reply_markup=_liog_markup(), parse_mode="")
                     return
                 if data == "ucfin:report":
                     bot.answer_callback_query(call.id)
