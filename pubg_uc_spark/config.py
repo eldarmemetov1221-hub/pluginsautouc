@@ -116,6 +116,18 @@ def _default_pack_costs() -> Dict[str, float]:
         return {}
 
 
+def _default_liog_variations() -> Dict[str, str]:
+    """Optional {denom: variation_id} override for LioGames, from LIOG_VARIATIONS
+    (JSON), e.g. {"60": "393960", "325": "393961"}. Empty -> resolve by label."""
+    raw = os.environ.get("LIOG_VARIATIONS", "").strip()
+    if not raw:
+        return {}
+    try:
+        return {str(k): str(v) for k, v in json.loads(raw).items()}
+    except (ValueError, AttributeError, TypeError):
+        return {}
+
+
 @dataclass
 class LotConfig:
     """Metadata for a single tracked FunPay lot.
@@ -374,6 +386,53 @@ class Config:
         default_factory=lambda: max(0, _get_int("STOCK_DEMAND_DAYS", 30))
     )
 
+    # ------------------------------------------------------------------ #
+    # LioGames bulk voucher purchasing (standalone "drip" buyer).
+    #
+    # Completely separate from Spark/FunPay delivery: the admin runs /uc_buy
+    # <denom> <qty>, the plugin buys that many PUBG UC VOUCHER codes from
+    # LioGames one order at a time (their order-create has no quantity field and
+    # a ~60s gap is required between purchases), then sends all the codes back as
+    # one file. The seller tops up the LioGames wallet themselves; the plugin
+    # only spends it. Signing: HMAC-SHA256 over the exact raw JSON body, header
+    # ``x-liog-sign`` (+ optional ``X-LIOG-KEY-ID`` for a scoped key).
+    # ------------------------------------------------------------------ #
+    liog_base_url: str = field(
+        default_factory=lambda: _get(
+            "LIOG_BASE_URL", "https://distribution.liogames.com/api/v1"
+        ).rstrip("/")
+    )
+    liog_member_code: str = field(default_factory=lambda: _get("LIOG_MEMBER_CODE", ""))
+    liog_secret: str = field(default_factory=lambda: _get("LIOG_SECRET", ""))
+    # Optional scoped-key id (lk_...); when set it is sent as X-LIOG-KEY-ID and
+    # LIOG_SECRET must be that key's secret.
+    liog_key_id: str = field(default_factory=lambda: _get("LIOG_KEY_ID", ""))
+    liog_timeout: float = field(default_factory=lambda: _get_float("LIOG_TIMEOUT", 30.0))
+    # Catalogue resolution: product name to match in /products, plus optional
+    # hard overrides so we never depend on name matching if LioGames renames it.
+    liog_product_name: str = field(
+        default_factory=lambda: _get("LIOG_PRODUCT_NAME", "PUBG Mobile Code (Global)")
+    )
+    liog_product_id: int = field(default_factory=lambda: _get_int("LIOG_PRODUCT_ID", 0))
+    # Optional map {denom: variation_id}, e.g. {"60": 393960}. Overrides the
+    # by-label variation lookup. Env: LIOG_VARIATIONS (JSON).
+    liog_variations: Dict[str, str] = field(default_factory=lambda: _default_liog_variations())
+    # Seconds to wait between successive order-create calls (LioGames rate limit).
+    liog_buy_interval: float = field(default_factory=lambda: _get_float("LIOG_BUY_INTERVAL", 60.0))
+    # Hard safety cap on a single /uc_buy batch (fat-finger / runaway guard).
+    liog_max_batch: int = field(default_factory=lambda: max(1, _get_int("LIOG_MAX_BATCH", 200)))
+    # order-status polling after a create (per item): how long/often to poll for
+    # the voucher code before leaving the item to be reconciled on the next pass.
+    liog_poll_attempts: int = field(default_factory=lambda: max(1, _get_int("LIOG_POLL_ATTEMPTS", 20)))
+    liog_poll_interval: float = field(default_factory=lambda: _get_float("LIOG_POLL_INTERVAL", 6.0))
+    # Use the sandbox endpoints (no live wallet spend) to validate wiring.
+    liog_sandbox: bool = field(default_factory=lambda: _get_bool("LIOG_SANDBOX", False))
+    # Mock mode (no network; deterministic fake codes) for tests/dev. Defaults on
+    # when no secret is configured, so the plugin never half-calls a real API.
+    liog_mock: bool = field(
+        default_factory=lambda: _get_bool("LIOG_MOCK", not bool(_get("LIOG_SECRET")))
+    )
+
     # UID format (section 9). Single source of truth for the pattern.
     # A PUBG player UID is digits only, 9-11 long. Kept configurable so the
     # rule can change without touching business logic. (Env: UID_PATTERN, with
@@ -402,6 +461,24 @@ class Config:
 
     def spark_job_url(self, job_id: str) -> str:
         return f"{self.spark_api_url}/v1/jobs/{job_id}"
+
+    # LioGames endpoint helpers (sandbox-aware for the write endpoints).
+    def liog_order_create_url(self) -> str:
+        seg = "/sandbox/order-create" if self.liog_sandbox else "/order-create"
+        return f"{self.liog_base_url}{seg}"
+
+    def liog_order_status_url(self) -> str:
+        seg = "/sandbox/order-status" if self.liog_sandbox else "/order-status"
+        return f"{self.liog_base_url}{seg}"
+
+    def liog_balance_url(self) -> str:
+        return f"{self.liog_base_url}/balance"
+
+    def liog_products_url(self) -> str:
+        return f"{self.liog_base_url}/products"
+
+    def liog_variations_url(self, product_id) -> str:
+        return f"{self.liog_base_url}/products/{product_id}/variations"
 
     def lot(self, lot_id) -> LotConfig | None:
         return self.lots.get(str(lot_id))

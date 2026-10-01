@@ -16,7 +16,9 @@ from .database.repository import Repository
 from .errors import SparkCriticalError
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
+from .liogames.client import LioGamesClient
 from .services.admin_service import AdminService
+from .services.buyer_service import BuyerService
 from .services.finance_store import FinanceStore
 from .services.order_service import OrderService
 from .services.retry_service import RetryService
@@ -47,8 +49,53 @@ class Plugin:
         self.orders = OrderService(self.cfg, self.repo, self.messenger, self.retry)
         self.admin = AdminService(self.cfg, self.repo, self.orders)
         self.finance_store = FinanceStore(self.cfg)
+        # Standalone LioGames voucher buyer (/uc_buy) - independent of Spark.
+        self.liogames = LioGamesClient(self.cfg)
+        self.buyer = BuyerService(
+            self.cfg, self.db, self.liogames,
+            notifier=self._buy_notify, file_sender=self._buy_send_files,
+            async_mode=async_mode,
+        )
 
     # ------------------------------------------------------------------ #
+    def _telegram_bot(self):
+        tg = getattr(self.cardinal, "telegram", None)
+        return getattr(tg, "bot", None)
+
+    def _buy_notify(self, admin_id, text: str) -> None:
+        """Send a drip-buyer progress/status message to the admin."""
+        bot = self._telegram_bot()
+        targets = [admin_id] if admin_id else list(self.cfg.admin_ids)
+        if bot is None:
+            log.info("[BUY->%s] %s", admin_id, text)
+            return
+        for t in targets:
+            if not t:
+                continue
+            try:
+                bot.send_message(t, text, parse_mode="")
+            except Exception:
+                log.exception("Failed to send buy notification to %s", t)
+
+    def _buy_send_files(self, admin_id, batch: dict, txt_path: str, csv_path: str) -> None:
+        """Send the finished batch's code files to the admin."""
+        bot = self._telegram_bot()
+        targets = [admin_id] if admin_id else list(self.cfg.admin_ids)
+        if bot is None:
+            log.info("[BUY-FILES->%s] %s | %s", admin_id, txt_path, csv_path)
+            return
+        caption = f"PUBG {batch.get('denom')} UC — закупка #{batch.get('id')} ({batch.get('note')})"
+        for t in targets:
+            if not t:
+                continue
+            for path in (txt_path, csv_path):
+                try:
+                    with open(path, "rb") as fh:
+                        bot.send_document(t, fh, caption=caption)
+                    caption = ""  # caption only on the first file
+                except Exception:
+                    log.exception("Failed to send buy file %s to %s", path, t)
+
     def _on_result(self, code_id, result, error, attempts):
         self.orders.apply_result(code_id, result, error, attempts)
 
@@ -68,6 +115,7 @@ class Plugin:
     def start(self) -> None:
         self.retry.start()
         self.finance_store.load_into_cfg()
+        self.buyer.start()
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, lots=%s, resumed=%s)",
@@ -78,6 +126,7 @@ class Plugin:
 
     def stop(self) -> None:
         self.retry.stop()
+        self.buyer.stop_worker()
         self.db.close()
 
     # ------------------------------------------------------------------ #
@@ -263,6 +312,109 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 return
             price = a[3] if len(a) >= 4 else None
             reply(message, admin.add_order(a[0], a[1], a[2], price=price))
+
+        # ---- LioGames drip buyer (/uc_buy ...) ---- #
+        def _buy_confirm_markup(batch_id):
+            from telebot import types
+            kb = types.InlineKeyboardMarkup()
+            kb.add(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"ucbuy:confirm:{batch_id}"),
+                types.InlineKeyboardButton("❌ Отмена", callback_data=f"ucbuy:cancel:{batch_id}"),
+            )
+            return kb
+
+        @bot.message_handler(commands=["uc_buy"])
+        def _uc_buy(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = _args(message)
+            if len(a) < 2 or not a[1].isdigit():
+                reply(message, "Usage: /uc_buy <номинал> <кол-во>\nНапр.: /uc_buy 60 50")
+                return
+            denom, qty = a[0], int(a[1])
+            try:
+                est = plugin.buyer.estimate(denom, qty)
+                batch_id = plugin.buyer.create_pending(
+                    denom, qty, getattr(message.chat, "id", None),
+                    variation_id=est["variation_id"], unit_price=est.get("unit_price") or 0.0)
+            except Exception as exc:
+                reply(message, f"Не получилось подготовить закупку: {exc}")
+                return
+            up = est.get("unit_price")
+            total = est.get("total")
+            bal = est.get("balance")
+            card = [
+                f"🛒 Закупка LioGames — подтверждение (#{batch_id})",
+                f"Товар: PUBG {denom} UC (ваучер-коды)",
+                f"Количество: {qty} шт.",
+            ]
+            if up is not None:
+                card.append(f"Цена за шт.: ${up:g}")
+            if total is not None:
+                card.append(f"Итого: ${total:g}")
+            if bal is not None:
+                card.append(f"Баланс кошелька: ${bal:g}")
+                if total is not None and bal < total:
+                    card.append("⚠️ Баланса не хватает на всю партию — закупка встанет на паузу, "
+                                "когда деньги кончатся (пополнишь — /uc_buy_resume).")
+            card.append(f"\n⏱ Покупаю по одной, ~{int(cfg.liog_buy_interval)}с между заказами "
+                        f"(≈{int(cfg.liog_buy_interval)*qty//60} мин на {qty} шт.).")
+            card.append("Нажми «✅ Подтвердить», чтобы начать. Спишется только после подтверждения.")
+            try:
+                bot.send_message(message.chat.id, "\n".join(card),
+                                 reply_markup=_buy_confirm_markup(batch_id), parse_mode="")
+            except Exception:
+                log.exception("Failed to send buy confirmation")
+
+        @bot.message_handler(commands=["uc_buy_status"])
+        def _uc_buy_status(message):  # pragma: no cover
+            if not guard(message):
+                return
+            a = _args(message)
+            bid = int(a[0]) if a and a[0].isdigit() else None
+            reply(message, plugin.buyer.status_text(bid))
+
+        @bot.message_handler(commands=["uc_buy_stop"])
+        def _uc_buy_stop(message):  # pragma: no cover
+            if not guard(message):
+                return
+            a = _args(message)
+            bid = int(a[0]) if a and a[0].isdigit() else None
+            reply(message, plugin.buyer.stop(bid))
+
+        @bot.message_handler(commands=["uc_buy_resume"])
+        def _uc_buy_resume(message):  # pragma: no cover
+            if not guard(message):
+                return
+            a = _args(message)
+            bid = int(a[0]) if a and a[0].isdigit() else None
+            reply(message, plugin.buyer.resume(bid))
+
+        @bot.callback_query_handler(func=lambda c: (getattr(c, "data", "") or "").startswith("ucbuy:"))
+        def _uc_buy_cb(call):  # pragma: no cover - requires telebot
+            if not cfg.is_admin(getattr(getattr(call, "from_user", None), "id", None)):
+                bot.answer_callback_query(call.id, "Нет доступа")
+                return
+            parts = (call.data or "").split(":")
+            action = parts[1] if len(parts) > 1 else ""
+            batch_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+            chat_id = call.message.chat.id
+            try:
+                if action == "confirm" and batch_id:
+                    bot.answer_callback_query(call.id, "Запускаю…")
+                    text = plugin.buyer.confirm(batch_id)
+                elif action == "cancel" and batch_id:
+                    bot.answer_callback_query(call.id, "Отменено")
+                    text = plugin.buyer.cancel_pending(batch_id)
+                else:
+                    bot.answer_callback_query(call.id)
+                    return
+                try:
+                    bot.edit_message_text(text, chat_id, call.message.message_id, parse_mode="")
+                except Exception:
+                    bot.send_message(chat_id, text, parse_mode="")
+            except Exception:
+                log.exception("Buy callback failed")
 
         @bot.message_handler(commands=["uc_finance"])
         def _finance(message):  # pragma: no cover - requires telebot

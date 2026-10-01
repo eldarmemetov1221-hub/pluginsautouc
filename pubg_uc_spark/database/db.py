@@ -70,9 +70,40 @@ CREATE TABLE IF NOT EXISTS processed_events (
     created_at        TEXT NOT NULL
 );
 
+-- LioGames bulk voucher purchasing (standalone /uc_buy drip buyer). These
+-- tables are independent of the FunPay order/delivery flow above.
+CREATE TABLE IF NOT EXISTS buy_batches (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    denom             TEXT NOT NULL,
+    variation_id      TEXT,
+    quantity          INTEGER NOT NULL,
+    status            TEXT NOT NULL,       -- PENDING_CONFIRM/RUNNING/PAUSED/DONE/STOPPED
+    unit_price        REAL DEFAULT 0,
+    admin_id          TEXT,                -- Telegram id to send progress + file to
+    note              TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS buy_items (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id          INTEGER NOT NULL REFERENCES buy_batches(id),
+    seq               INTEGER NOT NULL,
+    client_ref        TEXT NOT NULL UNIQUE,
+    status            TEXT NOT NULL,       -- QUEUED/ORDERED/DELIVERED/FAILED
+    liog_order_id     TEXT,
+    code              TEXT,
+    error_message     TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE(batch_id, seq)
+);
+
 CREATE INDEX IF NOT EXISTS idx_codes_hash ON codes(code_hash);
 CREATE INDEX IF NOT EXISTS idx_codes_order ON codes(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_buy_items_batch ON buy_items(batch_id);
+CREATE INDEX IF NOT EXISTS idx_buy_batches_status ON buy_batches(status);
 """
 
 

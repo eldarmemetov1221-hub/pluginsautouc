@@ -42,3 +42,21 @@ class SparkTemporaryError(TemporaryError):
 
 class SparkCriticalError(CriticalError):
     """Spark returned something we cannot interpret, or auth failed."""
+
+
+# --- LioGames-specific subclasses (bulk voucher purchasing) ---
+
+class LiogTemporaryError(TemporaryError):
+    """LioGames unreachable / timed out / 5xx / 429 / order still PROCESSING."""
+
+
+class LiogCriticalError(CriticalError):
+    """LioGames auth/signature failure or an unrecognisable response."""
+
+
+class LiogInsufficientBalance(PluginError):
+    """LioGames wallet cannot cover the order - pause and ask to top up.
+
+    Deliberately NOT a TemporaryError: we must stop buying and wait for the
+    seller to fund the wallet, not auto-retry into more failures.
+    """
