@@ -425,6 +425,12 @@ class Config:
     # the voucher code before leaving the item to be reconciled on the next pass.
     liog_poll_attempts: int = field(default_factory=lambda: max(1, _get_int("LIOG_POLL_ATTEMPTS", 20)))
     liog_poll_interval: float = field(default_factory=lambda: _get_float("LIOG_POLL_INTERVAL", 6.0))
+    # How many parallel collection passes to make before giving up on a still-
+    # processing order (money already spent; it stays recoverable via
+    # /uc_buy_status). ~passes x poll_interval seconds of waiting after the last
+    # create; default 60 x 6s = 6 min, comfortably over the ~2 min delivery time.
+    liog_collect_max_passes: int = field(
+        default_factory=lambda: max(1, _get_int("LIOG_COLLECT_MAX_PASSES", 60)))
     # Use the sandbox endpoints (no live wallet spend) to validate wiring.
     liog_sandbox: bool = field(default_factory=lambda: _get_bool("LIOG_SANDBOX", False))
     # Mock mode (no network; deterministic fake codes) for tests/dev. Defaults on

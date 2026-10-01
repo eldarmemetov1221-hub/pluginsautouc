@@ -74,6 +74,7 @@ def _mk(tmp_path, client, **notes):
     c.liog_buy_interval = 0.0
     c.liog_poll_interval = 0.0
     c.liog_poll_attempts = 2
+    c.liog_collect_max_passes = 2
     db = Database(c.database_path)
     notified, files = [], []
     svc = BuyerService(

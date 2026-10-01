@@ -428,7 +428,7 @@ class BuyerService:
         recovered = self._reconcile(batch_id)
         # Give up on orders stuck far past the poll budget (money already spent;
         # the order_id is kept so /uc_buy_status can still recover them later).
-        budget = max(1, int(self.cfg.liog_poll_attempts))
+        budget = max(1, int(getattr(self.cfg, "liog_collect_max_passes", 60)))
         for it in self._items(batch_id, status=ORDERED):
             n = self._passes.get(it["id"], 0) + 1
             self._passes[it["id"]] = n
