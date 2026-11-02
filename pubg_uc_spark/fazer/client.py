@@ -213,6 +213,12 @@ class FazerClient:
         order = body.get("order") if isinstance(body.get("order"), dict) else body
         return order if isinstance(order, dict) else {}
 
+    def order_status_raw(self, order_id: str) -> Dict[str, Any]:
+        """Full raw order body (diagnostics) to confirm the delivery fields."""
+        if self.cfg.fazer_mock:
+            return {"ok": True, "order": {"status": "completed", "player_name": "MockPlayer"}}
+        return self._req("GET", self.cfg.fazer_order_status_url(order_id))
+
     # ------------------------------------------------------------------ #
     # Status classification (defensive)
     # ------------------------------------------------------------------ #

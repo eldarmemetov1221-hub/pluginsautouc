@@ -443,6 +443,22 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception as exc:
                 reply(message, f"Диагностика упала: {exc}")
 
+        @bot.message_handler(commands=["uc_fazer_order"])
+        def _uc_fazer_order(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            import json as _json
+            a = _args(message)
+            if not a:
+                reply(message, "Usage: /uc_fazer_order <orderId> — сырой ответ заказа FazerCards")
+                return
+            try:
+                body = plugin.fazer.client.order_status_raw(a[0])
+                txt = _json.dumps(body, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                txt = f"{type(exc).__name__}: {exc}"
+            reply(message, f"order {a[0]}:\n{txt[:3500]}")
+
         @bot.message_handler(commands=["uc_buy_probe"])
         def _uc_buy_probe(message):  # pragma: no cover
             if not guard(message):
