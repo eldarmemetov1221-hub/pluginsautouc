@@ -128,6 +128,19 @@ def _default_liog_variations() -> Dict[str, str]:
         return {}
 
 
+def _default_fazer_offers() -> Dict[str, str]:
+    """Optional {denom: offer_id} override for FazerCards, from FAZER_OFFERS
+    (JSON), e.g. {"60": "pubg-60", "325": "pubg-325"}. Empty -> resolve by the
+    offer's name (the denom as a standalone number)."""
+    raw = os.environ.get("FAZER_OFFERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        return {str(k): str(v) for k, v in json.loads(raw).items()}
+    except (ValueError, AttributeError, TypeError):
+        return {}
+
+
 @dataclass
 class LotConfig:
     """Metadata for a single tracked FunPay lot.
@@ -342,6 +355,36 @@ class Config:
     # but watch Spark rate limits / quota). Default 1 = fully serial.
     spark_workers: int = field(default_factory=lambda: max(1, _get_int("SPARK_WORKERS", 1)))
 
+    # ------------------------------------------------------------------ #
+    # Delivery provider selection + FazerCards (https://api.fzr.cards).
+    # FazerCards is an alternative DIRECT top-up provider (credits UC to the
+    # player's UID, like Spark). Chosen globally via delivery_provider; a lot's
+    # picks are fulfilled as one FazerCards top-up order per base pack, so combo
+    # lots place several orders. Toggle live from the menu / /uc_provider;
+    # persisted in finance.json.
+    # ------------------------------------------------------------------ #
+    delivery_provider: str = field(
+        default_factory=lambda: (_get("DELIVERY_PROVIDER", "spark").strip().lower() or "spark"))
+    fazer_api_url: str = field(
+        default_factory=lambda: _get("FAZER_API_URL", "https://api.fzr.cards").rstrip("/"))
+    fazer_api_key: str = field(default_factory=lambda: _get("FAZER_API_KEY", ""))
+    fazer_timeout: float = field(default_factory=lambda: _get_float("FAZER_TIMEOUT", 30.0))
+    # Catalogue resolution: the game category name to match in /topups, plus
+    # optional hard overrides so we never depend on name matching.
+    fazer_category_name: str = field(default_factory=lambda: _get("FAZER_CATEGORY_NAME", "PUBG"))
+    fazer_category_id: str = field(default_factory=lambda: _get("FAZER_CATEGORY_ID", ""))
+    # Optional {denom: offer_id} map; empty -> resolve by offer name.
+    fazer_offers: Dict[str, str] = field(default_factory=lambda: _default_fazer_offers())
+    # Per sub-order status polling.
+    fazer_poll_attempts: int = field(default_factory=lambda: max(1, _get_int("FAZER_POLL_ATTEMPTS", 40)))
+    fazer_poll_interval: float = field(default_factory=lambda: _get_float("FAZER_POLL_INTERVAL", 4.0))
+    # Validate the player UID (POST /topups/validate-id) before ordering.
+    fazer_validate_id: bool = field(default_factory=lambda: _get_bool("FAZER_VALIDATE_ID", True))
+    # Mock mode (no network; deterministic) for tests/dev. Defaults on when no
+    # key is configured, so the plugin never half-calls a real API.
+    fazer_mock: bool = field(
+        default_factory=lambda: _get_bool("FAZER_MOCK", not bool(_get("FAZER_API_KEY"))))
+
     # Master switch for AUTOMATIC redemption. When False the plugin still tracks
     # orders and records the buyer's UID, but never calls Spark - instead it
     # pings the admin to deliver manually (use during a Spark outage). Toggle
@@ -485,6 +528,30 @@ class Config:
 
     def liog_variations_url(self, product_id) -> str:
         return f"{self.liog_base_url}/products/{product_id}/variations"
+
+    # FazerCards endpoint helpers.
+    def fazer_topups_url(self) -> str:
+        return f"{self.fazer_api_url}/api/v2/topups"
+
+    def fazer_offers_url(self) -> str:
+        return f"{self.fazer_api_url}/api/v2/topups/offers"
+
+    def fazer_validate_url(self) -> str:
+        return f"{self.fazer_api_url}/api/v2/topups/validate-id"
+
+    def fazer_order_url(self) -> str:
+        return f"{self.fazer_api_url}/api/v2/topups/order"
+
+    def fazer_order_status_url(self, order_id) -> str:
+        return f"{self.fazer_api_url}/api/v2/orders/{order_id}"
+
+    def fazer_balance_url(self) -> str:
+        return f"{self.fazer_api_url}/api/v2/balance"
+
+    def provider(self) -> str:
+        """Normalised active delivery provider: 'fazercards' or 'spark'."""
+        p = str(getattr(self, "delivery_provider", "spark") or "spark").lower()
+        return "fazercards" if p in ("fazer", "fazercards", "fzr") else "spark"
 
     def lot(self, lot_id) -> LotConfig | None:
         return self.lots.get(str(lot_id))

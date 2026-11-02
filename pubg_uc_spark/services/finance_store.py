@@ -55,9 +55,14 @@ class FinanceStore:
         fr = data.get("finance_reset_at")
         if isinstance(fr, str):
             self.cfg.finance_reset_at = fr
-        log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s, reset_at=%s)",
+        dp = data.get("delivery_provider")
+        if isinstance(dp, str) and dp:
+            self.cfg.delivery_provider = dp
+        log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s, "
+                 "provider=%s, reset_at=%s)",
                  self.cfg.commission_percent, self.cfg.pack_costs,
                  getattr(self.cfg, "auto_delivery", True),
+                 getattr(self.cfg, "delivery_provider", "spark"),
                  getattr(self.cfg, "finance_reset_at", "") or "-")
 
     # ------------------------------------------------------------------ #
@@ -82,12 +87,19 @@ class FinanceStore:
         self.cfg.finance_reset_at = iso_ts or ""
         return self._write(self._current())
 
+    def set_delivery_provider(self, provider: str) -> bool:
+        """Switch the active delivery provider ('spark'|'fazercards') and persist."""
+        p = str(provider or "spark").lower()
+        self.cfg.delivery_provider = "fazercards" if p in ("fazer", "fazercards", "fzr") else "spark"
+        return self._write(self._current())
+
     # ------------------------------------------------------------------ #
     def _current(self) -> Dict:
         return {
             "commission_percent": self.cfg.commission_percent,
             "pack_costs": dict(self.cfg.pack_costs),
             "auto_delivery": bool(getattr(self.cfg, "auto_delivery", True)),
+            "delivery_provider": getattr(self.cfg, "delivery_provider", "spark"),
             "finance_reset_at": getattr(self.cfg, "finance_reset_at", "") or "",
         }
 

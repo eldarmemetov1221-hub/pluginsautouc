@@ -14,6 +14,7 @@ from .config import Config, SPARK_BASE_DENOMINATIONS, get_config
 from .database.db import Database
 from .database.repository import Repository
 from .errors import SparkCriticalError
+from .fazer.checker import FazerChecker
 from .funpay import orders as funpay_orders
 from .funpay.messenger import FunPayMessenger
 from .liogames.client import LioGamesClient
@@ -42,6 +43,7 @@ class Plugin:
         self.repo = Repository(self.db)
         self.messenger = FunPayMessenger(cardinal, self.cfg, self.repo)
         self.checker = SparkChecker(self.cfg)
+        self.fazer = FazerChecker(self.cfg)
         # retry calls _perform_check(code_id) and reports via _on_result.
         self.retry = RetryService(
             self.cfg, self._perform_check, self._on_result, async_mode=async_mode
@@ -100,15 +102,20 @@ class Plugin:
         self.orders.apply_result(code_id, result, error, attempts)
 
     def _perform_check(self, code_id: int):
-        """Build the Spark redeem request for a stored UID and run it."""
+        """Build the redeem request for a stored UID and run it on the active
+        provider (Spark or FazerCards), chosen globally via delivery_provider."""
         code = self.repo.get_code(code_id)
         if code is None:
             raise SparkCriticalError(f"code_id {code_id} vanished")
         order = self.repo.get_order(code.order_id) if code.order_id else None
         lot = self.cfg.lot(order.lot_id) if order else None
         quantity = order.quantity if order else 1
-        # Spark picks are the lot's base combination multiplied by the quantity.
+        # Picks are the lot's base-pack combination multiplied by the quantity.
         picks = lot.picks_for(quantity) if lot else {"60": max(1, quantity)}
+        if self.cfg.provider() == "fazercards":
+            # Direct top-up to the UID; combo lots place one order per pack.
+            # Idempotency per sub-order keyed by our code id -> no double top-up.
+            return self.fazer.redeem(code.code, picks, idempotency_prefix=f"code{code_id}")
         return self.checker.redeem(code.code, picks)
 
     # ------------------------------------------------------------------ #
@@ -118,8 +125,9 @@ class Plugin:
         self.buyer.start()
         resumed = self.orders.resume_unfinished()
         log.info(
-            "Plugin started (mock=%s, lots=%s, resumed=%s)",
+            "Plugin started (mock=%s, provider=%s, lots=%s, resumed=%s)",
             self.cfg.spark_mock,
+            self.cfg.provider(),
             list(self.cfg.lots.keys()),
             resumed,
         )
@@ -413,6 +421,28 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception as exc:
                 reply(message, f"Диагностика упала: {exc}")
 
+        @bot.message_handler(commands=["uc_provider"])
+        def _uc_provider(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = _args(message)
+            if a:
+                plugin.finance_store.set_delivery_provider(a[0])
+            prov = "Spark" if cfg.provider() == "spark" else "FazerCards"
+            reply(message,
+                  f"Провайдер выдачи: {prov}\n"
+                  "Сменить: /uc_provider spark | /uc_provider fazercards\n"
+                  "(или кнопка «🔀 Провайдер» в меню /uc_prices)")
+
+        @bot.message_handler(commands=["uc_fazer_ping"])
+        def _uc_fazer_ping(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            try:
+                reply(message, "🔎 FazerCards диагностика:\n" + plugin.fazer.client.diagnose())
+            except Exception as exc:
+                reply(message, f"Диагностика упала: {exc}")
+
         @bot.message_handler(commands=["uc_buy_probe"])
         def _uc_buy_probe(message):  # pragma: no cover
             if not guard(message):
@@ -607,16 +637,22 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             toggle = ("⏸ Выключить автовыдачу" if _auto_on()
                       else "▶️ Включить автовыдачу")
             kb.add(types.InlineKeyboardButton(toggle, callback_data="ucfin:toggle"))
+            prov = "Spark" if cfg.provider() == "spark" else "FazerCards"
+            kb.add(types.InlineKeyboardButton(f"🔀 Провайдер: {prov} (сменить)",
+                                              callback_data="ucfin:provider"))
             kb.add(types.InlineKeyboardButton("🛒 Закупка кодов (LioGames)", callback_data="ucfin:liog"))
             kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
             return kb
 
         def _root_text():
             state = "🟢 ВКЛ" if _auto_on() else "🔴 ВЫКЛ — ручная выдача"
+            prov = "Spark" if cfg.provider() == "spark" else "FazerCards"
             return ("🎮 PUBG UC Spark\n\n"
-                    f"Автовыдача: {state}\n\n"
+                    f"Автовыдача: {state}\n"
+                    f"Провайдер выдачи: {prov}\n\n"
                     "📊 Статистика — прибыль, выручка, себестоимость, цены\n"
                     "📦 Сток — остатки Spark и каких пачек не хватает\n"
+                    "🔀 Провайдер — чем пополнять заказы (Spark или FazerCards)\n"
                     "🛒 Закупка кодов — купить ваучеры PUBG UC на LioGames\n"
                     "⏸/▶️ — вкл/выкл автоматическое начисление")
 
@@ -842,6 +878,17 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                     bot.answer_callback_query(
                         call.id,
                         "▶️ Автовыдача включена" if new_state else "⏸ Автовыдача выключена")
+                    try:
+                        bot.edit_message_text(_root_text(), chat_id, call.message.message_id,
+                                              reply_markup=_root_markup())
+                    except Exception:
+                        _show_root(chat_id)
+                    return
+                if data == "ucfin:provider":
+                    new_prov = "fazercards" if cfg.provider() == "spark" else "spark"
+                    plugin.finance_store.set_delivery_provider(new_prov)
+                    label = "Spark" if new_prov == "spark" else "FazerCards"
+                    bot.answer_callback_query(call.id, f"Провайдер: {label}")
                     try:
                         bot.edit_message_text(_root_text(), chat_id, call.message.message_id,
                                               reply_markup=_root_markup())
