@@ -38,9 +38,18 @@ class FazerChecker:
         log.info("[Fazer] Top-up picks=%s uid=%s (total=%s)", picks, mask_code(player_id), total)
 
         # Validate the UID once up front (cheap, avoids spending on a bad id).
+        # Validation is best-effort: if it is unsupported for this category, or
+        # errors in a non-transient way, proceed to order anyway (the order
+        # itself rejects a bad UID). Only an explicit valid=False stops us.
         if getattr(self.cfg, "fazer_validate_id", True):
-            v = self.client.validate_id(player_id)
-            if not v.get("valid"):
+            try:
+                v = self.client.validate_id(player_id)
+            except SparkTemporaryError:
+                raise
+            except Exception as exc:
+                log.warning("[Fazer] validate-id ошибка, продолжаю без неё: %s", exc)
+                v = {"valid": True, "supported": False}
+            if v.get("supported", True) and not v.get("valid"):
                 return SparkResult(status=UnifiedStatus.ACCOUNT_NOT_FOUND,
                                    message="account_not_found", total=total)
 

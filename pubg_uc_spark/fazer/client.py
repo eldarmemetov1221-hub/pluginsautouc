@@ -181,15 +181,26 @@ class FazerClient:
             return None
 
     def validate_id(self, player_id: str, server_id: str = "") -> Dict[str, Any]:
-        """Validate the player UID. Returns {'valid': bool, 'player_name': str}."""
+        """Validate the player UID. Returns {'valid': bool, 'supported': bool,
+        'player_name': str}. Some categories don't support validation (HTTP 400
+        "ID validation is not available") -> report supported=False so the caller
+        skips it and orders directly."""
         if self.cfg.fazer_mock:
             head = (player_id or "0")[0]
-            return {"valid": head != "2", "player_name": "MockPlayer" if head != "2" else ""}
+            return {"valid": head != "2", "supported": True,
+                    "player_name": "MockPlayer" if head != "2" else ""}
         cid = self.resolve_category_id()
         fields = self._build_fields(player_id, server_id)
-        body = self._req("POST", self.cfg.fazer_validate_url(),
-                         json_body={"category_id": cid, "fields": fields})
-        return {"valid": bool(body.get("valid")),
+        try:
+            body = self._req("POST", self.cfg.fazer_validate_url(),
+                             json_body={"category_id": cid, "fields": fields})
+        except SparkCriticalError as exc:
+            msg = str(exc).lower()
+            if "not available" in msg or "http 400" in msg or "not supported" in msg:
+                log.info("[Fazer] validate-id не поддерживается для %s — пропускаю", cid)
+                return {"valid": True, "supported": False, "player_name": ""}
+            raise
+        return {"valid": bool(body.get("valid")), "supported": True,
                 "player_name": body.get("player_name") or "",
                 "region": body.get("region") or ""}
 

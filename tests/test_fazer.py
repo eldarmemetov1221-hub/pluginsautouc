@@ -104,6 +104,18 @@ def test_bad_uid_is_account_not_found_without_spending():
     assert client.orders == []            # never placed an order
 
 
+def test_validation_unsupported_proceeds_to_order():
+    """When the category has no ID validation (HTTP 400), skip it and order."""
+    class NoValidate(FakeFazerClient):
+        def validate_id(self, player_id, server_id=""):
+            return {"valid": True, "supported": False, "player_name": ""}
+    client = NoValidate()
+    chk = FazerChecker(_cfg(), client=client)
+    res = chk.redeem("100000001", {"60": 1})
+    assert res.status is UnifiedStatus.VALID
+    assert len(client.orders) == 1        # ordered despite no validation
+
+
 def test_mock_client_end_to_end():
     c = Config()                           # fazer_mock True (no key) by default
     assert c.fazer_mock is True
