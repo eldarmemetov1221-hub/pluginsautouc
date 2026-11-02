@@ -459,6 +459,34 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                 txt = f"{type(exc).__name__}: {exc}"
             reply(message, f"order {a[0]}:\n{txt[:3500]}")
 
+        @bot.message_handler(commands=["uc_fazer_test"])
+        def _uc_fazer_test(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            import json as _json
+            import time as _time
+            a = _args(message)
+            if len(a) < 2:
+                reply(message, "Usage: /uc_fazer_test <номинал> <uid>\n"
+                               "Напр.: /uc_fazer_test 60 5241... — ОДИН реальный заказ "
+                               "(спишет деньги), покажет сырой ответ (ник/статус/код).")
+                return
+            denom, uid = a[0], a[1]
+            try:
+                offer_id = plugin.fazer.client.resolve_offer_id(denom)
+                idem = f"uctest:{denom}:{uid}"   # idempotent: повтор не задвоит
+                created = plugin.fazer.client.create_order(offer_id, uid, "", idem)
+                out = [f"offer_id={offer_id}  idem={idem}", "", "— create —",
+                       _json.dumps(created, ensure_ascii=False, indent=2)]
+                oid = created.get("order_id")
+                if oid:
+                    _time.sleep(5)
+                    raw = plugin.fazer.client.order_status_raw(oid)
+                    out += ["", "— order-status —", _json.dumps(raw, ensure_ascii=False, indent=2)]
+                reply(message, ("🧪 FazerCards тест:\n" + "\n".join(out))[:3900])
+            except Exception as exc:
+                reply(message, f"{type(exc).__name__}: {exc}")
+
         @bot.message_handler(commands=["uc_buy_probe"])
         def _uc_buy_probe(message):  # pragma: no cover
             if not guard(message):
