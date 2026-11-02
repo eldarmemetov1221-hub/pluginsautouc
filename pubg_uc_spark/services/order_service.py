@@ -61,6 +61,12 @@ class OrderService:
             total_uc = int(str(uc)) * qty
         except (TypeError, ValueError):
             total_uc = ""
+        # Some providers (e.g. FazerCards top-ups) don't return the in-game
+        # nickname. Drop any line that renders it when it's empty, so the buyer
+        # never sees a blank "Имя игрока:" line.
+        if not player_name:
+            template = "\n".join(
+                ln for ln in template.split("\n") if "{player_name}" not in ln)
         return template.format(
             order_id=order.funpay_order_id,
             order=order.funpay_order_id,  # alias for the FunPay order URL

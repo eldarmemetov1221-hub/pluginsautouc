@@ -48,6 +48,10 @@ class FakeFazerClient:
         return False
 
     @staticmethod
+    def fail_message(o):
+        return str(o.get("fail_reason") or o.get("message") or "failed")
+
+    @staticmethod
     def player_name_of(o):
         return o.get("player_name", "")
 
@@ -122,6 +126,23 @@ def test_mock_client_end_to_end():
     chk = FazerChecker(c)                   # real client in mock mode
     res = chk.redeem("100000001", {"60": 2})
     assert res.status is UnifiedStatus.VALID and res.delivered == 2
+
+
+def test_message_omits_nickname_when_absent():
+    """FazerCards top-ups return no nickname -> drop the 'Имя игрока' line,
+    but keep it when a name is present (e.g. Spark)."""
+    from pubg_uc_spark.database.models import OrderRecord
+    from pubg_uc_spark.services.order_service import OrderService
+    c = Config()
+    c.lots = {"L": LotConfig("L", "60 UC", "60", {"60": 1})}
+    svc = OrderService(c, repo=None, messenger=None, retry_service=None)
+    order = OrderRecord(funpay_order_id="O1", lot_id="L", quantity=1)
+    tmpl = c.messages.valid
+    assert "{player_name}" in tmpl
+    with_name = svc._fmt(order, tmpl, uid="5101895432", player_name="Neo")
+    no_name = svc._fmt(order, tmpl, uid="5101895432", player_name="")
+    assert "Neo" in with_name and "Имя игрока" in with_name
+    assert "Имя игрока" not in no_name     # blank line dropped
 
 
 def test_provider_switch_persists(tmp_path):

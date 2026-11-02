@@ -248,8 +248,17 @@ class FazerClient:
         return self._status_of(order) in _FAIL
 
     def is_bad_player(self, order: dict) -> bool:
-        txt = " ".join(str(order.get(k) or "") for k in ("error", "message", "reason", "status"))
+        txt = " ".join(str(order.get(k) or "") for k in
+                       ("fail_reason", "error", "message", "reason", "status"))
         return bool(_INVALID_UID.search(txt))
+
+    @staticmethod
+    def fail_message(order: dict) -> str:
+        for k in ("fail_reason", "message", "error", "reason"):
+            v = order.get(k)
+            if v:
+                return str(v)
+        return "failed"
 
     @staticmethod
     def player_name_of(order: dict) -> str:

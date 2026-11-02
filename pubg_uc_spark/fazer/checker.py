@@ -106,7 +106,7 @@ class FazerChecker:
         if self.client.is_bad_player(order):
             return {"_bad_player": True, "_msg": "invalid player"}
         if self.client.is_failed(order):
-            return {"_ok": False, "_msg": str(order.get("message") or order.get("error") or "failed")}
+            return {"_ok": False, "_msg": self.client.fail_message(order)}
         if not order_id:
             raise SparkCriticalError("FazerCards: order has no id and is not terminal")
 
@@ -118,7 +118,7 @@ class FazerChecker:
             if self.client.is_bad_player(o):
                 return {"_bad_player": True, "_msg": "invalid player"}
             if self.client.is_failed(o):
-                return {"_ok": False, "_msg": str(o.get("message") or o.get("error") or "failed")}
+                return {"_ok": False, "_msg": self.client.fail_message(o)}
             if i < attempts - 1:
                 time.sleep(self.cfg.fazer_poll_interval)
         # Not terminal within budget -> transient, let the caller decide/retry.
