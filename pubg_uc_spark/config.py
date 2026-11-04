@@ -379,11 +379,11 @@ class Config:
     fazer_category_id: str = field(default_factory=lambda: _get("FAZER_CATEGORY_ID", ""))
     # Optional {denom: offer_id} map; empty -> resolve by offer name.
     fazer_offers: Dict[str, str] = field(default_factory=lambda: _default_fazer_offers())
-    # Per sub-order status polling. Top-ups can take a few minutes, so the
-    # default window is generous (~6 min = 90 x 4s) to avoid a "did not finish
+    # Per sub-order status polling. Top-ups can take several minutes, so the
+    # default window is generous (~12 min = 180 x 4s) to avoid a "did not finish
     # in time" on a delivery that actually completes. A timeout is still safe to
     # /uc_recheck: the idempotency-key reuses the same order (no double charge).
-    fazer_poll_attempts: int = field(default_factory=lambda: max(1, _get_int("FAZER_POLL_ATTEMPTS", 90)))
+    fazer_poll_attempts: int = field(default_factory=lambda: max(1, _get_int("FAZER_POLL_ATTEMPTS", 180)))
     fazer_poll_interval: float = field(default_factory=lambda: _get_float("FAZER_POLL_INTERVAL", 4.0))
     # Validate the player UID (POST /topups/validate-id) before ordering.
     fazer_validate_id: bool = field(default_factory=lambda: _get_bool("FAZER_VALIDATE_ID", True))
