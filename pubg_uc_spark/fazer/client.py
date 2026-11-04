@@ -48,6 +48,7 @@ class FazerClient:
         self._offers_cache: Optional[List[dict]] = None
         self._offer_by_denom: Dict[str, str] = dict(getattr(config, "fazer_offers", {}) or {})
         self._fields_cache: Optional[List[dict]] = None
+        self._price_by_denom: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Transport
@@ -179,6 +180,44 @@ class FazerClient:
             return float(v)
         except (TypeError, ValueError):
             return None
+
+    def offer_price(self, denom: str) -> Optional[float]:
+        """Published price (USD) of one pack of ``denom`` UC, for cost estimates.
+        Returns None if it can't be read - never fabricated."""
+        denom = str(denom)
+        if denom in self._price_by_denom:
+            return self._price_by_denom[denom]
+        if self.cfg.fazer_mock:
+            # deterministic mock prices (~real PUBG tiers)
+            table = {"60": 0.88, "325": 4.44, "660": 8.89, "1800": 22.24,
+                     "3850": 44.49, "8100": 88.99}
+            return table.get(denom, 0.9)
+        offers = self._load_offers()
+        want_oid = self._offer_by_denom.get(denom)
+        for o in offers:
+            name = str(o.get("name") or "")
+            oid = str(o.get("offer_id") or "")
+            hit = (want_oid and oid == want_oid) or re.search(
+                rf"(?<!\d){re.escape(denom)}(?!\d)", name)
+            if hit and o.get("price_usd") is not None:
+                try:
+                    p = float(o["price_usd"])
+                    self._price_by_denom[denom] = p
+                    return p
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    def lot_cost_usd(self, base_picks: Dict[str, int]) -> Optional[float]:
+        """Total USD cost of ONE unit of a lot (sum of its base packs' prices).
+        Returns None if any pack's price can't be read."""
+        total = 0.0
+        for denom, count in (base_picks or {}).items():
+            p = self.offer_price(str(denom))
+            if p is None:
+                return None
+            total += p * int(count)
+        return round(total, 4)
 
     def validate_id(self, player_id: str, server_id: str = "") -> Dict[str, Any]:
         """Validate the player UID. Returns {'valid': bool, 'supported': bool,

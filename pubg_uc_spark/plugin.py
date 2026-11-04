@@ -58,6 +58,12 @@ class Plugin:
             notifier=self._buy_notify, file_sender=self._buy_send_files,
             async_mode=async_mode,
         )
+        # Balance guard: hide lots FazerCards can't cover (monitor/enforce).
+        from .services.balance_guard import BalanceGuard
+        self.guard = BalanceGuard(
+            self.cfg, self.db, self.fazer.client, cardinal,
+            notifier=self.messenger.notify_admin, async_mode=async_mode,
+        )
 
     # ------------------------------------------------------------------ #
     def _telegram_bot(self):
@@ -100,6 +106,14 @@ class Plugin:
 
     def _on_result(self, code_id, result, error, attempts):
         self.orders.apply_result(code_id, result, error, attempts)
+        # A successful FazerCards top-up drops the wallet; re-check lot coverage.
+        try:
+            from .spark.models import UnifiedStatus
+            if (result is not None and result.status is UnifiedStatus.VALID
+                    and self.cfg.provider() == "fazercards" and self.cfg.guard_on()):
+                self.guard.poke()
+        except Exception:
+            log.debug("guard poke after result failed", exc_info=True)
 
     def _perform_check(self, code_id: int):
         """Build the redeem request for a stored UID and run it on the active
@@ -123,6 +137,7 @@ class Plugin:
         self.retry.start()
         self.finance_store.load_into_cfg()
         self.buyer.start()
+        self.guard.start()
         resumed = self.orders.resume_unfinished()
         log.info(
             "Plugin started (mock=%s, provider=%s, lots=%s, resumed=%s)",
@@ -135,6 +150,7 @@ class Plugin:
     def stop(self) -> None:
         self.retry.stop()
         self.buyer.stop_worker()
+        self.guard.stop()
         self.db.close()
 
     # ------------------------------------------------------------------ #
@@ -443,6 +459,25 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             except Exception as exc:
                 reply(message, f"Диагностика упала: {exc}")
 
+        @bot.message_handler(commands=["uc_guard"])
+        def _uc_guard(message):  # pragma: no cover - requires telebot
+            if not guard(message):
+                return
+            a = [x.lower() for x in _args(message)]
+            if a:
+                if a[0] in ("off", "выкл"):
+                    plugin.finance_store.set_balance_guard(enabled=False)
+                elif a[0] in ("on", "вкл", "monitor"):
+                    plugin.finance_store.set_balance_guard(enabled=True, mode="monitor")
+                elif a[0] in ("enforce", "скрывать"):
+                    plugin.finance_store.set_balance_guard(enabled=True, mode="enforce")
+                plugin.guard.poke()
+            try:
+                reply(message, plugin.guard.status_text()
+                      + "\n\nУправление: /uc_guard on | enforce | off")
+            except Exception as exc:
+                reply(message, f"Страж: {exc}")
+
         @bot.message_handler(commands=["uc_fazer_order"])
         def _uc_fazer_order(message):  # pragma: no cover - requires telebot
             if not guard(message):
@@ -684,6 +719,10 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             prov = "Spark" if cfg.provider() == "spark" else "FazerCards"
             kb.add(types.InlineKeyboardButton(f"🔀 Провайдер: {prov} (сменить)",
                                               callback_data="ucfin:provider"))
+            g_on = cfg.guard_on()
+            g_mode = "enforce" if cfg.guard_enforce() else "monitor"
+            g_lbl = f"🛡 Страж баланса: {'ВКЛ·'+g_mode if g_on else 'ВЫКЛ'}"
+            kb.add(types.InlineKeyboardButton(g_lbl, callback_data="ucfin:guard"))
             kb.add(types.InlineKeyboardButton("🛒 Закупка кодов (LioGames)", callback_data="ucfin:liog"))
             kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="ucfin:close"))
             return kb
@@ -938,6 +977,36 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
                                               reply_markup=_root_markup())
                     except Exception:
                         _show_root(chat_id)
+                    return
+                if data == "ucfin:guard" or data.startswith("ucfin:guardset:") or data == "ucfin:guardcheck":
+                    from telebot import types as _t
+                    if data.startswith("ucfin:guardset:"):
+                        m = data.split(":", 2)[2]
+                        if m == "off":
+                            plugin.finance_store.set_balance_guard(enabled=False)
+                        elif m == "enforce":
+                            plugin.finance_store.set_balance_guard(enabled=True, mode="enforce")
+                        else:
+                            plugin.finance_store.set_balance_guard(enabled=True, mode="monitor")
+                    bot.answer_callback_query(call.id, "Проверяю…" if data == "ucfin:guardcheck" else None)
+                    kb = _t.InlineKeyboardMarkup(row_width=3)
+                    kb.add(
+                        _t.InlineKeyboardButton("👀 monitor", callback_data="ucfin:guardset:monitor"),
+                        _t.InlineKeyboardButton("🛡 enforce", callback_data="ucfin:guardset:enforce"),
+                        _t.InlineKeyboardButton("⛔ выкл", callback_data="ucfin:guardset:off"),
+                    )
+                    kb.add(
+                        _t.InlineKeyboardButton("🔄 Проверить", callback_data="ucfin:guardcheck"),
+                        _t.InlineKeyboardButton("⬅️ Назад", callback_data="ucfin:root"),
+                    )
+                    try:
+                        txt = plugin.guard.status_text()
+                    except Exception as exc:
+                        txt = f"Страж: {exc}"
+                    try:
+                        bot.edit_message_text(txt, chat_id, call.message.message_id, reply_markup=kb)
+                    except Exception:
+                        bot.send_message(chat_id, txt, reply_markup=kb)
                     return
                 if data == "ucfin:liog":
                     bot.answer_callback_query(call.id, "Загружаю…")

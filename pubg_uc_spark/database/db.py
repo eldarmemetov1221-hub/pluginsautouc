@@ -106,6 +106,16 @@ CREATE INDEX IF NOT EXISTS idx_codes_order ON codes(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_buy_items_batch ON buy_items(batch_id);
 CREATE INDEX IF NOT EXISTS idx_buy_batches_status ON buy_batches(status);
+
+-- Balance guard: which lots the plugin auto-hid (so it never re-shows a lot the
+-- seller hid manually), plus the last computed cost.
+CREATE TABLE IF NOT EXISTS lot_guard (
+    lot_id            TEXT PRIMARY KEY,
+    auto_hidden       INTEGER DEFAULT 0,   -- 1 = hidden by the guard
+    last_cost_usd     REAL DEFAULT 0,
+    last_action       TEXT,                -- "hidden" | "shown" | "monitor"
+    updated_at        TEXT
+);
 """
 
 

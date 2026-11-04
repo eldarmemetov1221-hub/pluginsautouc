@@ -388,6 +388,25 @@ class Config:
     fazer_mock: bool = field(
         default_factory=lambda: _get_bool("FAZER_MOCK", not bool(_get("FAZER_API_KEY"))))
 
+    # ------------------------------------------------------------------ #
+    # Balance guard: when the FazerCards wallet can't cover a lot's cost, hide
+    # that lot on FunPay (deactivate), and restore it when the balance recovers.
+    # mode "monitor" only notifies (no FunPay edits); "enforce" actually
+    # hides/shows. Toggle live from the menu / /uc_guard; persisted in
+    # finance.json. Only applies while the active provider is FazerCards.
+    # ------------------------------------------------------------------ #
+    balance_guard_enabled: bool = field(default_factory=lambda: _get_bool("BALANCE_GUARD", False))
+    balance_guard_mode: str = field(
+        default_factory=lambda: (_get("BALANCE_GUARD_MODE", "monitor").strip().lower() or "monitor"))
+    # Safety margin before RE-showing a lot (hysteresis, anti-flap): a hidden lot
+    # is restored only when balance >= cost * (1 + pct/100) + usd.
+    balance_guard_margin_pct: float = field(
+        default_factory=lambda: _get_float("BALANCE_GUARD_MARGIN_PCT", 10.0))
+    balance_guard_margin_usd: float = field(
+        default_factory=lambda: _get_float("BALANCE_GUARD_MARGIN_USD", 0.0))
+    balance_guard_interval: float = field(
+        default_factory=lambda: max(30.0, _get_float("BALANCE_GUARD_INTERVAL", 180.0)))
+
     # Master switch for AUTOMATIC redemption. When False the plugin still tracks
     # orders and records the buyer's UID, but never calls Spark - instead it
     # pings the admin to deliver manually (use during a Spark outage). Toggle
@@ -555,6 +574,20 @@ class Config:
         """Normalised active delivery provider: 'fazercards' or 'spark'."""
         p = str(getattr(self, "delivery_provider", "spark") or "spark").lower()
         return "fazercards" if p in ("fazer", "fazercards", "fzr") else "spark"
+
+    def guard_on(self) -> bool:
+        return bool(getattr(self, "balance_guard_enabled", False))
+
+    def guard_enforce(self) -> bool:
+        """True only when the guard may actually hide/show lots on FunPay."""
+        return (self.guard_on()
+                and str(getattr(self, "balance_guard_mode", "monitor")).lower() == "enforce")
+
+    def guard_show_threshold(self, cost_usd: float) -> float:
+        """Balance needed to RE-show a hidden lot (cost + margin)."""
+        pct = float(getattr(self, "balance_guard_margin_pct", 0.0) or 0.0)
+        usd = float(getattr(self, "balance_guard_margin_usd", 0.0) or 0.0)
+        return cost_usd * (1.0 + pct / 100.0) + usd
 
     def lot(self, lot_id) -> LotConfig | None:
         return self.lots.get(str(lot_id))

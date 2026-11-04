@@ -58,6 +58,12 @@ class FinanceStore:
         dp = data.get("delivery_provider")
         if isinstance(dp, str) and dp:
             self.cfg.delivery_provider = dp
+        bg = data.get("balance_guard_enabled")
+        if isinstance(bg, bool):
+            self.cfg.balance_guard_enabled = bg
+        bgm = data.get("balance_guard_mode")
+        if isinstance(bgm, str) and bgm:
+            self.cfg.balance_guard_mode = bgm
         log.info("Finance settings loaded (commission=%s%%, packs=%s, auto_delivery=%s, "
                  "provider=%s, reset_at=%s)",
                  self.cfg.commission_percent, self.cfg.pack_costs,
@@ -93,6 +99,15 @@ class FinanceStore:
         self.cfg.delivery_provider = "fazercards" if p in ("fazer", "fazercards", "fzr") else "spark"
         return self._write(self._current())
 
+    def set_balance_guard(self, enabled: bool = None, mode: str = None) -> bool:
+        """Toggle the balance guard and/or its mode ('monitor'|'enforce'); persist."""
+        if enabled is not None:
+            self.cfg.balance_guard_enabled = bool(enabled)
+        if mode is not None:
+            m = str(mode).lower()
+            self.cfg.balance_guard_mode = "enforce" if m == "enforce" else "monitor"
+        return self._write(self._current())
+
     # ------------------------------------------------------------------ #
     def _current(self) -> Dict:
         return {
@@ -100,6 +115,8 @@ class FinanceStore:
             "pack_costs": dict(self.cfg.pack_costs),
             "auto_delivery": bool(getattr(self.cfg, "auto_delivery", True)),
             "delivery_provider": getattr(self.cfg, "delivery_provider", "spark"),
+            "balance_guard_enabled": bool(getattr(self.cfg, "balance_guard_enabled", False)),
+            "balance_guard_mode": getattr(self.cfg, "balance_guard_mode", "monitor"),
             "finance_reset_at": getattr(self.cfg, "finance_reset_at", "") or "",
         }
 

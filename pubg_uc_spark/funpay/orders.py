@@ -84,6 +84,68 @@ def get_lot_amounts(cardinal, lot_ids) -> dict:
     return out
 
 
+def set_lot_active(cardinal, lot_id, active: bool) -> bool:
+    """Activate/deactivate a FunPay lot (offer) by its id.
+
+    Reads the lot fields via FunPayAPI (account.get_lot_fields), flips the
+    ``active`` flag and saves them back (account.save_lot). Only the active flag
+    is changed - all other fields (title, price, description) are preserved by
+    saving exactly what was read. Fully duck-typed and defensive: returns True on
+    success, False on any failure (never raises). Used to hide a lot when the
+    provider wallet can't cover it, and to restore it later.
+    """
+    account = getattr(cardinal, "account", None)
+    getter = getattr(account, "get_lot_fields", None)
+    saver = getattr(account, "save_lot", None)
+    if not callable(getter) or not callable(saver):
+        log.warning("set_lot_active: FunPay account has no get/save_lot")
+        return False
+    try:
+        key = int(lot_id) if str(lot_id).isdigit() else lot_id
+        lf = getter(key)
+        # LotFields exposes `active` as a settable property in FunPayAPI; fall
+        # back to mutating the raw fields dict ("active" present == active).
+        set_ok = False
+        try:
+            setattr(lf, "active", bool(active))
+            set_ok = getattr(lf, "active", None) == bool(active)
+        except Exception:
+            set_ok = False
+        if not set_ok:
+            fields = getattr(lf, "fields", None)
+            if isinstance(fields, dict):
+                if active:
+                    fields["active"] = "on"
+                else:
+                    fields.pop("active", None)
+        saver(lf)
+        log.info("[guard] FunPay lot %s -> %s", lot_id, "active" if active else "hidden")
+        return True
+    except Exception:
+        log.exception("set_lot_active failed for %s", lot_id)
+        return False
+
+
+def is_lot_active(cardinal, lot_id):
+    """Return True/False if the lot is active, or None if it can't be read."""
+    account = getattr(cardinal, "account", None)
+    getter = getattr(account, "get_lot_fields", None)
+    if not callable(getter):
+        return None
+    try:
+        key = int(lot_id) if str(lot_id).isdigit() else lot_id
+        lf = getter(key)
+        active = getattr(lf, "active", None)
+        if active is None:
+            fields = getattr(lf, "fields", None)
+            if isinstance(fields, dict):
+                active = "active" in fields
+        return bool(active) if active is not None else None
+    except Exception:
+        log.debug("is_lot_active failed for %s", lot_id, exc_info=True)
+        return None
+
+
 def match_lot(cfg: Config, order_shortcut) -> Optional[LotConfig]:
     """Return the configured lot whose description keywords match, else None."""
     description = getattr(order_shortcut, "description", "") or ""
