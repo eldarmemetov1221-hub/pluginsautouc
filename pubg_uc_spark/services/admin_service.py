@@ -31,7 +31,7 @@ class AdminService:
             "/uc_code <code_id> — детали кода\n"
             "/uc_history <order_id> — журнал событий заказа\n\n"
             "🔧 Действия:\n"
-            "/uc_recheck <code_id> — повторить проверку/начисление\n"
+            "/uc_recheck <code_id|order_id> — повторить проверку/начисление\n"
             "/uc_cancel <code_id> — отменить автоповторы (FAILED)\n"
             "/uc_setstatus <order_id> <СТАТУС> — сменить статус заказа\n"
             "/uc_resend <order_id> — попросить покупателя прислать UID\n"
@@ -328,17 +328,27 @@ class AdminService:
         )
 
     # ---- write ---- #
-    def recheck(self, code_id: int) -> str:
-        """Force a re-check of a code, overriding final-negative guard."""
-        c = self.repo.get_code(int(code_id))
+    def recheck(self, ref) -> str:
+        """Force a re-check of a code, overriding final-negative guard.
+
+        ``ref`` may be a numeric code_id OR a FunPay order id (then the order's
+        latest code is re-checked) - so /uc_recheck works with either."""
+        s = str(ref)
+        c = self.repo.get_code(int(s)) if s.isdigit() else None
+        if c is None:
+            order = self.repo.get_order_by_funpay_id(s)
+            if order:
+                codes = self.repo.get_codes_for_order(order.id)
+                if codes:
+                    c = codes[-1]            # latest code on the order
         if not c:
-            return f"Code #{code_id} not found."
+            return f"Не найдено: нет кода #{ref} и нет заказа #{ref}."
         self.repo.update_code(c.id, status=CodeStatus.CHECKING, error_message="")
         if c.order_id:
             self.repo.set_order_status(c.order_id, OrderStatus.CHECKING, force=True)
         self.repo.add_log("admin_recheck", f"code #{c.id}", order_id=c.order_id, code_id=c.id)
         self.orders.retry.enqueue(c.id)
-        return f"Code #{c.id} re-queued for checking."
+        return f"Code #{c.id} (заказ #{c.funpay_order_id}) поставлен на повторную выдачу."
 
     def cancel_retry(self, code_id: int) -> str:
         """Stop future automatic retries for a code."""

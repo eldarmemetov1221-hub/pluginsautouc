@@ -292,7 +292,7 @@ def _register_admin_commands(cardinal, plugin: Plugin) -> None:
             if not guard(message):
                 return
             a = _args(message)
-            reply(message, admin.recheck(a[0]) if a else "Usage: /uc_recheck <code_id>")
+            reply(message, admin.recheck(a[0]) if a else "Usage: /uc_recheck <code_id | order_id>")
 
         @bot.message_handler(commands=["uc_cancel"])
         def _cancel(message):  # pragma: no cover
