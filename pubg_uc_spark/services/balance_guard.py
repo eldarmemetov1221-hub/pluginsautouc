@@ -83,10 +83,11 @@ class BalanceGuard:
             return None
 
     def check_once(self) -> dict:
-        """One evaluation pass. Returns a summary dict (also used by the status
-        screen). Only edits FunPay in enforce mode. Guard applies to FazerCards."""
+        """One evaluation pass (variant C - dynamic stock). For each lot the live
+        наличие is capped to ``min(desired, floor(balance/cost))``; 0 -> hide.
+        Only edits FunPay in enforce mode. Applies to the FazerCards provider."""
         result = {"provider": self.cfg.provider(), "balance": None, "lots": [],
-                  "hidden": 0, "shown": 0, "skipped": ""}
+                  "hidden": 0, "changed": 0, "skipped": ""}
         if self.cfg.provider() != "fazercards":
             result["skipped"] = "провайдер не FazerCards"
             return result
@@ -100,67 +101,105 @@ class BalanceGuard:
             result["skipped"] = "баланс не прочитан"
             return result
         result["balance"] = balance
-
         enforce = self.cfg.guard_enforce()
+
         for lot in self.cfg.lots.values():
-            cost = self.lot_cost(lot)
-            row = self._row(lot.lot_id)
-            was_hidden = bool(row and row["auto_hidden"])
-            entry = {"lot_id": lot.lot_id, "product": lot.product, "cost": cost,
-                     "afford": None, "auto_hidden": was_hidden, "action": ""}
-            if cost is None:
-                entry["action"] = "цена неизвестна — пропуск"
-                result["lots"].append(entry)
-                continue
-            affordable = balance >= cost
-            show_ok = balance >= self.cfg.guard_show_threshold(cost)
-            entry["afford"] = affordable
-
-            # Decide the desired action with hysteresis + manual-hide respect.
-            if not affordable:
-                # Needs hiding (if currently shown / not already auto-hidden).
-                if not was_hidden:
-                    entry["action"] = "hide"
-            else:
-                # Affordable again: restore only lots WE hid, and only past margin.
-                if was_hidden and show_ok:
-                    entry["action"] = "show"
-
-            if entry["action"] == "hide":
-                if enforce:
-                    ok = funpay_orders.set_lot_active(self.cardinal, lot.lot_id, False)
-                    if ok:
-                        self._set_row(lot.lot_id, auto_hidden=1, cost=cost, action="hidden")
-                        result["hidden"] += 1
-                        self._notify(f"⚠️ Лот «{lot.product}» СКРЫТ — баланс ${balance:g} "
-                                     f"< себестоимость ${cost:g}.")
-                    else:
-                        entry["action"] = "hide-failed"
-                else:  # monitor
-                    self._set_row(lot.lot_id, auto_hidden=0, cost=cost, action="monitor")
-                    self._notify(f"👀 На лот «{lot.product}» не хватает: баланс ${balance:g} "
-                                 f"< ${cost:g} (режим monitor — лот не скрыт).")
-            elif entry["action"] == "show":
-                if enforce:
-                    ok = funpay_orders.set_lot_active(self.cardinal, lot.lot_id, True)
-                    if ok:
-                        self._set_row(lot.lot_id, auto_hidden=0, cost=cost, action="shown")
-                        result["shown"] += 1
-                        self._notify(f"✅ Лот «{lot.product}» возвращён — баланс ${balance:g} "
-                                     f"покрывает ${cost:g}.")
-                    else:
-                        entry["action"] = "show-failed"
-            else:
-                # no change; keep the recorded cost fresh
-                self._set_row(lot.lot_id, auto_hidden=1 if was_hidden else 0,
-                              cost=cost, action=(row["last_action"] if row else ""))
+            entry = self._eval_lot(lot, balance, enforce)
+            if entry.get("_hidden"):
+                result["hidden"] += 1
+            if entry.get("_changed"):
+                result["changed"] += 1
             result["lots"].append(entry)
         return result
+
+    def _eval_lot(self, lot, balance: float, enforce: bool) -> dict:
+        lot_id = lot.lot_id
+        cost = self.lot_cost(lot)
+        row = self._row(lot_id)
+        auto_hidden = bool(row and row["auto_hidden"])
+        entry = {"lot_id": lot_id, "product": lot.product, "cost": cost,
+                 "desired": None, "afford": None, "target": None, "cur": None,
+                 "auto_hidden": auto_hidden, "action": ""}
+        if not cost or cost <= 0:
+            entry["action"] = "цена неизвестна"
+            return entry
+
+        amount, active = funpay_orders.read_lot(self.cardinal, lot_id)
+        entry["cur"] = amount
+        managed = int(row["managed_amount"]) if row and row["managed_amount"] is not None else -1
+        desired_stored = int(row["desired_amount"]) if row and row["desired_amount"] else 0
+
+        # Seller's intended stock ceiling.
+        if int(getattr(lot, "stock", 0) or 0) > 0:
+            desired = int(lot.stock)                      # pinned in config
+        elif amount is not None and amount != managed and active is not False and amount > 0:
+            desired = amount                              # seller changed наличие -> follow
+        elif desired_stored > 0:
+            desired = desired_stored
+        elif amount is not None and amount > 0:
+            desired = amount                              # first capture
+        else:
+            desired = 1
+        entry["desired"] = desired
+
+        affordable = int(balance // cost)                 # whole units the wallet covers
+        target = max(0, min(desired, affordable))
+        entry["afford"] = affordable
+        entry["target"] = target
+
+        if target <= 0:
+            # Can't cover even one unit -> hide (deactivate).
+            entry["action"] = "hide"
+            if enforce:
+                if active is not False:
+                    ok = funpay_orders.set_lot_active(self.cardinal, lot_id, False)
+                    if ok:
+                        self._notify(f"⚠️ Лот «{lot.product}» СКРЫТ — баланс ${balance:g} "
+                                     f"не покрывает $ {cost:g}/шт.")
+                        entry["_hidden"] = True
+                    else:
+                        entry["action"] = "hide-failed"
+                self._save(lot_id, auto_hidden=1, cost=cost, desired=desired,
+                           managed=0, action="hidden")
+            else:
+                self._notify(f"👀 На «{lot.product}» не хватает даже на 1 шт "
+                             f"(баланс ${balance:g} < ${cost:g}) — monitor, лот не тронут.")
+                self._save(lot_id, auto_hidden=0, cost=cost, desired=desired,
+                           managed=managed, action="monitor")
+            return entry
+
+        # Affordable: desired stock capped to what the wallet covers.
+        entry["action"] = "ok" if target >= desired else "cap"
+        if enforce:
+            need = (amount != target) or (active is False)
+            if need:
+                ok = funpay_orders.set_lot_amount(self.cardinal, lot_id, target, active=True)
+                if ok:
+                    if auto_hidden or active is False:
+                        self._notify(f"✅ Лот «{lot.product}» возвращён — наличие {target}.")
+                    elif target < desired:
+                        self._notify(f"✂️ Лот «{lot.product}»: наличие урезано до {target} "
+                                     f"(хватает только на {affordable}).")
+                    entry["_changed"] = True
+                    self._save(lot_id, auto_hidden=0, cost=cost, desired=desired,
+                               managed=target, action=("capped" if target < desired else "shown"))
+                else:
+                    entry["action"] = "set-failed"
+            else:
+                self._save(lot_id, auto_hidden=0, cost=cost, desired=desired,
+                           managed=target, action=entry["action"])
+        else:
+            self._save(lot_id, auto_hidden=0, cost=cost, desired=desired,
+                       managed=managed, action="monitor")
+            if target < desired:
+                self._notify(f"👀 «{lot.product}»: хватает на {target} из {desired} "
+                             f"(monitor — наличие не меняю).")
+        return entry
 
     # ------------------------------------------------------------------ #
     def status_text(self) -> str:
         enforce = self.cfg.guard_enforce()
-        mode = "enforce (скрывает лоты)" if enforce else "monitor (только уведомления)"
+        mode = "enforce (меняет наличие/скрывает)" if enforce else "monitor (только уведомления)"
         on = "ВКЛ" if self.cfg.guard_on() else "ВЫКЛ"
         r = self.check_once()
         lines = [f"🛡 Страж баланса: {on} · режим: {mode}",
@@ -173,24 +212,29 @@ class BalanceGuard:
             if e["cost"] is None:
                 lines.append(f"  • {e['product']}: цена неизвестна")
                 continue
-            if e["auto_hidden"] or e["action"] in ("hide", "hide-failed"):
+            if e["target"] is not None and e["target"] <= 0:
                 mark = "🔴 скрыт"
-            elif e["afford"]:
-                mark = "🟢 ок"
+            elif e["target"] is not None and e["desired"] is not None and e["target"] < e["desired"]:
+                mark = f"🟠 {e['target']}/{e['desired']} шт"
             else:
-                mark = "🟠 не хватает"
-            lines.append(f"  • {e['product']}: ${e['cost']:g} — {mark}")
+                mark = f"🟢 {e['target']} шт"
+            lines.append(f"  • {e['product']}: ${e['cost']:g}/шт — {mark}")
         return "\n".join(lines)
 
     # ---- DB ---- #
     def _row(self, lot_id):
         return self.db.query_one("SELECT * FROM lot_guard WHERE lot_id = ?", (str(lot_id),))
 
-    def _set_row(self, lot_id, *, auto_hidden: int, cost: float, action: str) -> None:
+    def _save(self, lot_id, *, auto_hidden: int, cost: float, desired: int,
+              managed: int, action: str) -> None:
         self.db.execute(
-            """INSERT INTO lot_guard (lot_id, auto_hidden, last_cost_usd, last_action, updated_at)
-               VALUES (?,?,?,?,?)
+            """INSERT INTO lot_guard
+               (lot_id, auto_hidden, last_cost_usd, desired_amount, managed_amount,
+                last_action, updated_at)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(lot_id) DO UPDATE SET
                  auto_hidden=excluded.auto_hidden, last_cost_usd=excluded.last_cost_usd,
+                 desired_amount=excluded.desired_amount, managed_amount=excluded.managed_amount,
                  last_action=excluded.last_action, updated_at=excluded.updated_at""",
-            (str(lot_id), int(auto_hidden), float(cost or 0), action or "", _now()))
+            (str(lot_id), int(auto_hidden), float(cost or 0), int(desired),
+             int(managed), action or "", _now()))

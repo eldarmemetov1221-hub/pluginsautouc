@@ -113,7 +113,9 @@ CREATE TABLE IF NOT EXISTS lot_guard (
     lot_id            TEXT PRIMARY KEY,
     auto_hidden       INTEGER DEFAULT 0,   -- 1 = hidden by the guard
     last_cost_usd     REAL DEFAULT 0,
-    last_action       TEXT,                -- "hidden" | "shown" | "monitor"
+    desired_amount    INTEGER DEFAULT 0,   -- seller's intended stock ceiling
+    managed_amount    INTEGER DEFAULT -1,  -- amount WE last wrote (-1 = never)
+    last_action       TEXT,                -- "hidden" | "shown" | "capped" | "monitor"
     updated_at        TEXT
 );
 """
@@ -166,6 +168,17 @@ class Database:
         if bcols and "variation_id" not in bcols:
             self._conn.execute("ALTER TABLE buy_items ADD COLUMN variation_id TEXT")
             log.info("Migrated: added buy_items.variation_id column")
+        # lot_guard gained desired/managed amount for dynamic stock (variant C).
+        try:
+            gcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(lot_guard)")}
+        except Exception:
+            gcols = set()
+        if gcols and "desired_amount" not in gcols:
+            self._conn.execute("ALTER TABLE lot_guard ADD COLUMN desired_amount INTEGER DEFAULT 0")
+            log.info("Migrated: added lot_guard.desired_amount column")
+        if gcols and "managed_amount" not in gcols:
+            self._conn.execute("ALTER TABLE lot_guard ADD COLUMN managed_amount INTEGER DEFAULT -1")
+            log.info("Migrated: added lot_guard.managed_amount column")
 
     @property
     def lock(self) -> threading.RLock:

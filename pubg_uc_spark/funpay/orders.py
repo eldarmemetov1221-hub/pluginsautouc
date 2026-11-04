@@ -146,6 +146,70 @@ def is_lot_active(cardinal, lot_id):
         return None
 
 
+def read_lot(cardinal, lot_id):
+    """Return (amount, active) for a lot: its FunPay наличие and active flag.
+    Either element is None if it can't be read. Unlike get_lot_amounts this does
+    NOT zero-out inactive lots - the guard needs the raw declared amount."""
+    account = getattr(cardinal, "account", None)
+    getter = getattr(account, "get_lot_fields", None)
+    if not callable(getter):
+        return (None, None)
+    try:
+        key = int(lot_id) if str(lot_id).isdigit() else lot_id
+        lf = getter(key)
+        fields = getattr(lf, "fields", None)
+        active = getattr(lf, "active", None)
+        if active is None and isinstance(fields, dict):
+            active = "active" in fields
+        amount = getattr(lf, "amount", None)
+        if amount is None and isinstance(fields, dict):
+            raw = fields.get("amount")
+            amount = int(raw) if str(raw).strip().isdigit() else None
+        elif amount is not None and not isinstance(amount, int):
+            amount = int(amount) if str(amount).strip().isdigit() else None
+        return (amount, (bool(active) if active is not None else None))
+    except Exception:
+        log.debug("read_lot failed for %s", lot_id, exc_info=True)
+        return (None, None)
+
+
+def set_lot_amount(cardinal, lot_id, amount: int, active: bool = True) -> bool:
+    """Set a lot's наличие (amount) and activate it, preserving all other fields.
+    Duck-typed and defensive; returns True on success, False on any failure."""
+    account = getattr(cardinal, "account", None)
+    getter = getattr(account, "get_lot_fields", None)
+    saver = getattr(account, "save_lot", None)
+    if not callable(getter) or not callable(saver):
+        log.warning("set_lot_amount: FunPay account has no get/save_lot")
+        return False
+    try:
+        key = int(lot_id) if str(lot_id).isdigit() else lot_id
+        lf = getter(key)
+        fields = getattr(lf, "fields", None)
+        # active flag
+        try:
+            setattr(lf, "active", bool(active))
+        except Exception:
+            if isinstance(fields, dict):
+                if active:
+                    fields["active"] = "on"
+                else:
+                    fields.pop("active", None)
+        # amount
+        try:
+            setattr(lf, "amount", int(amount))
+        except Exception:
+            pass
+        if isinstance(getattr(lf, "fields", None), dict):
+            lf.fields["amount"] = str(int(amount))
+        saver(lf)
+        log.info("[guard] FunPay lot %s -> amount=%s active=%s", lot_id, amount, active)
+        return True
+    except Exception:
+        log.exception("set_lot_amount failed for %s", lot_id)
+        return False
+
+
 def match_lot(cfg: Config, order_shortcut) -> Optional[LotConfig]:
     """Return the configured lot whose description keywords match, else None."""
     description = getattr(order_shortcut, "description", "") or ""

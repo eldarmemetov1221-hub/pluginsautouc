@@ -1,4 +1,4 @@
-"""BalanceGuard: per-lot FazerCards cost, hide/show decisions, hysteresis."""
+"""BalanceGuard variant C: dynamic stock (наличие) capped to the wallet."""
 
 import os
 import sys
@@ -27,139 +27,134 @@ class FakeFazer:
         return round(total, 4)
 
 
+class _LF:
+    def __init__(self, lot_id, amount, active):
+        self.lot_id = lot_id
+        self.amount = amount
+        self.active = active
+        self.fields = {}
+
+
 class FakeCardinal:
-    """Records set_lot_active calls and reports lots as active."""
-    def __init__(self):
-        self.calls = []       # (lot_id, active)
+    """Real funpay helpers drive this via get_lot_fields / save_lot."""
+    def __init__(self, state):
+        self.state = {str(k): dict(v) for k, v in state.items()}
+        self.saves = []
 
         class _Acc:
             def __init__(self, outer):
-                self.outer = outer
+                self.o = outer
 
-            def get_lot_fields(self, lot_id):
-                class _LF:
-                    active = True
-                    fields = {"active": "on"}
-                return _LF()
+            def get_lot_fields(self, key):
+                st = self.o.state[str(key)]
+                return _LF(key, st["amount"], st["active"])
 
             def save_lot(self, lf):
-                return True
+                self.o.state[str(lf.lot_id)] = {"amount": int(lf.amount), "active": bool(lf.active)}
+                self.o.saves.append((str(lf.lot_id), int(lf.amount), bool(lf.active)))
         self.account = _Acc(self)
 
 
-def _mk(tmp_path, balance, *, enabled=True, mode="monitor", margin_pct=10.0):
+def _mk(tmp_path, balance, state, *, mode="enforce"):
     c = Config()
     c.database_path = str(tmp_path / "g.db")
     c.delivery_provider = "fazercards"
-    c.balance_guard_enabled = enabled
+    c.balance_guard_enabled = True
     c.balance_guard_mode = mode
-    c.balance_guard_margin_pct = margin_pct
     c.lots = {
         "L60": LotConfig("L60", "60 UC", "60", {"60": 1}),
         "L8100": LotConfig("L8100", "8100 UC", "8100", {"8100": 1}),
-        "L8425": LotConfig("L8425", "8425 UC", "8425", {"8100": 1, "325": 1}),  # combo
     }
     db = Database(c.database_path)
     notes = []
-    g = BalanceGuard(c, db, FakeFazer(balance), FakeCardinal(),
+    card = FakeCardinal(state)
+    g = BalanceGuard(c, db, FakeFazer(balance), card,
                      notifier=lambda t: notes.append(t), async_mode=False)
-    return c, db, g, notes
+    return c, db, g, card, notes
 
 
 def test_cost_calc_including_combo(tmp_path):
-    c, db, g, notes = _mk(tmp_path, 1000)
+    c, db, g, card, notes = _mk(tmp_path, 1000,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    c.lots["L8425"] = LotConfig("L8425", "8425 UC", "8425", {"8100": 1, "325": 1})
+    card.state["L8425"] = {"amount": 1, "active": True}
     costs = {e["lot_id"]: e["cost"] for e in g.check_once()["lots"]}
-    assert costs["L60"] == 0.88
-    assert costs["L8100"] == 88.99
-    assert costs["L8425"] == round(88.99 + 4.44, 4)   # combo = both packs
+    assert costs["L60"] == 0.88 and costs["L8100"] == 88.99
+    assert costs["L8425"] == round(88.99 + 4.44, 4)
     db.close()
 
 
-def test_monitor_notifies_but_never_hides(tmp_path):
-    c, db, g, notes = _mk(tmp_path, 9.0, mode="monitor")   # covers 60, not 8100/8425
-    g.cardinal.calls = []
-    r = g.check_once()
-    assert r["hidden"] == 0 and r["shown"] == 0            # monitor never edits
-    assert g.cardinal.account.save_lot                      # exists but unused
-    assert any("не хватает" in n for n in notes)
+def test_enforce_caps_stock_to_affordable(tmp_path):
+    # balance 3 -> covers floor(3/0.88)=3 of 60 UC; declared 8 -> cap to 3.
+    # 8100 ($88.99) -> 0 affordable -> hidden.
+    c, db, g, card, notes = _mk(tmp_path, 3.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    g.check_once()
+    assert card.state["L60"] == {"amount": 3, "active": True}     # capped 8 -> 3
+    assert card.state["L8100"]["active"] is False                 # hidden
     db.close()
 
 
-def test_enforce_hides_unaffordable_and_restores(tmp_path):
-    c, db, g, notes = _mk(tmp_path, 9.0, mode="enforce")    # only 60 affordable
-    # capture save_lot(active) by wrapping funpay helper via cardinal account
-    from pubg_uc_spark.funpay import orders as fo
-    calls = []
-    orig = fo.set_lot_active
-    fo.set_lot_active = lambda card, lid, active: (calls.append((lid, active)) or True)
-    try:
-        r = g.check_once()
-        hidden = {lid for lid, a in calls if a is False}
-        assert "L8100" in hidden and "L8425" in hidden and "L60" not in hidden
-        assert r["hidden"] == 2
-        # now top up a lot: balance covers everything -> restore the hidden ones
-        g.fazer._balance = 1000.0
-        calls.clear()
-        r2 = g.check_once()
-        shown = {lid for lid, a in calls if a is True}
-        assert shown == {"L8100", "L8425"}
-        assert r2["shown"] == 2
-    finally:
-        fo.set_lot_active = orig
+def test_restore_full_stock_after_topup(tmp_path):
+    c, db, g, card, notes = _mk(tmp_path, 3.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    g.check_once()                                                # caps 60->3, hides 8100
+    assert card.state["L60"]["amount"] == 3
+    g.fazer._balance = 1000.0
+    g.check_once()                                                # plenty -> restore
+    assert card.state["L60"] == {"amount": 8, "active": True}     # back to desired 8
+    assert card.state["L8100"] == {"amount": 2, "active": True}   # 8100 restored + active
     db.close()
 
 
-def test_does_not_reshow_manually_hidden_lot(tmp_path):
-    c, db, g, notes = _mk(tmp_path, 1000.0, mode="enforce")
-    # mark L8100 as manually hidden (auto_hidden=0) in the guard table
-    g._set_row("L8100", auto_hidden=0, cost=88.99, action="")
-    from pubg_uc_spark.funpay import orders as fo
-    calls = []
-    orig = fo.set_lot_active
-    fo.set_lot_active = lambda card, lid, active: (calls.append((lid, active)) or True)
-    try:
-        g.check_once()
-        # balance is plenty, but L8100 was NOT auto-hidden -> never auto-shown
-        assert all(lid != "L8100" for lid, a in calls)
-    finally:
-        fo.set_lot_active = orig
+def test_no_write_when_already_correct(tmp_path):
+    c, db, g, card, notes = _mk(tmp_path, 1000.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    g.check_once()
+    assert card.saves == []        # everything affordable & already at desired -> no edits
+    db.close()
+
+
+def test_follows_seller_amount_change_when_ample(tmp_path):
+    c, db, g, card, notes = _mk(tmp_path, 1000.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    g.check_once()                                   # captures desired=8, managed=8
+    card.state["L60"]["amount"] = 15                 # seller raises наличие by hand
+    g.check_once()
+    assert g._row("L60")["desired_amount"] == 15     # desired follows the seller
+    db.close()
+
+
+def test_monitor_never_edits(tmp_path):
+    c, db, g, card, notes = _mk(tmp_path, 3.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}}, mode="monitor")
+    g.check_once()
+    assert card.saves == []                          # monitor never touches FunPay
+    assert any("хватает на" in n or "не хватает" in n for n in notes)
     db.close()
 
 
 def test_balance_read_failure_touches_nothing(tmp_path):
-    c, db, g, notes = _mk(tmp_path, None, mode="enforce")   # balance None
-    from pubg_uc_spark.funpay import orders as fo
-    calls = []
-    orig = fo.set_lot_active
-    fo.set_lot_active = lambda card, lid, active: (calls.append((lid, active)) or True)
-    try:
-        r = g.check_once()
-        assert r["skipped"] == "баланс не прочитан"
-        assert calls == []
-    finally:
-        fo.set_lot_active = orig
+    c, db, g, card, notes = _mk(tmp_path, None,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    r = g.check_once()
+    assert r["skipped"] == "баланс не прочитан"
+    assert card.saves == []
     db.close()
 
 
-def test_hysteresis_margin_blocks_flap(tmp_path):
-    # cost 88.99; margin 10% -> re-show needs balance >= 97.889.
-    c, db, g, notes = _mk(tmp_path, 80.0, mode="enforce", margin_pct=10.0)
-    from pubg_uc_spark.funpay import orders as fo
-    calls = []
-    orig = fo.set_lot_active
-    fo.set_lot_active = lambda card, lid, active: (calls.append((lid, active)) or True)
-    try:
-        g.check_once()                                  # 80 < 88.99 -> hide 8100 (+8425)
-        assert ("L8100", False) in calls
-        calls.clear()
-        g.fazer._balance = 92.0                          # affordable but < cost+margin
-        g.check_once()
-        assert all(lid != "L8100" for lid, a in calls)   # NOT re-shown yet (anti-flap)
-        calls.clear()
-        g.fazer._balance = 100.0                          # past the margin
-        g.check_once()
-        assert ("L8100", True) in calls                  # now restored
-    finally:
-        fo.set_lot_active = orig
+def test_provider_not_fazer_skips(tmp_path):
+    c, db, g, card, notes = _mk(tmp_path, 3.0,
+                                {"L60": {"amount": 8, "active": True},
+                                 "L8100": {"amount": 2, "active": True}})
+    c.delivery_provider = "spark"
+    r = g.check_once()
+    assert r["skipped"] and card.saves == []
     db.close()
-

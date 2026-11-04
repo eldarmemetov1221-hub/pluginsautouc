@@ -165,6 +165,9 @@ class LotConfig:
     # id, so matching is by description. Empty -> match by ``uc`` (as a whole
     # number) + "uc".
     keywords: list = field(default_factory=list)
+    # Optional balance-guard stock ceiling (desired наличие). 0/absent -> the
+    # guard captures the current FunPay наличие as the ceiling instead.
+    stock: int = 0
 
     def base_picks(self) -> dict:
         """The Spark picks for ONE unit of this lot."""
@@ -211,6 +214,7 @@ def _default_lots() -> Dict[str, LotConfig]:
                     uc=str(meta.get("uc", meta.get("denomination", "60"))),
                     picks={str(k): int(v) for k, v in (meta.get("picks", {}) or {}).items()},
                     keywords=list(meta.get("keywords", []) or []),
+                    stock=int(meta.get("stock", 0) or 0),
                 )
                 for lid, meta in data.items()
             }
