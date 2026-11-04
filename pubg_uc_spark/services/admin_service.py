@@ -333,7 +333,7 @@ class AdminService:
 
         ``ref`` may be a numeric code_id OR a FunPay order id (then the order's
         latest code is re-checked) - so /uc_recheck works with either."""
-        s = str(ref)
+        s = str(ref).lstrip("#").strip()
         c = self.repo.get_code(int(s)) if s.isdigit() else None
         if c is None:
             order = self.repo.get_order_by_funpay_id(s)
